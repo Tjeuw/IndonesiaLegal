@@ -1,0 +1,11 @@
+package.json
+package-lock.json
+node_modules/
+server/
+client/
+pyproject.toml
+uv.lock
+drizzle.config.ts
+script/
+migrations/
+shared/
