@@ -8,7 +8,6 @@ import psycopg2.extras
 from flask import Flask, render_template, request, jsonify, session
 import pdfplumber
 from google import genai
-from google.genai import types
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
@@ -17,10 +16,7 @@ app.secret_key = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
-client = genai.Client(
-    api_key=os.environ.get("GOOGLE_API_KEY"),
-    http_options=types.HttpOptions(api_version='v1')
-)
+client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
 
 SYSTEM_PROMPT = """Name: Indonesia Law AI
 Goal: A RAG-based (Retrieval-Augmented Generation) system for querying Indonesian laws, regulations, and court decisions. An expert Indonesian legal research assistant specializing in corporate, investment, and business law. You reason carefully about Indonesian law using the frameworks below before answering any question.
@@ -576,13 +572,8 @@ def send_message(conv_id):
 
     try:
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=SYSTEM_PROMPT + "\n\n" + "\n".join(prompt_parts),
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                temperature=0.3,
-                max_output_tokens=2048,
-            )
+            model="gemini-2.0-flash-lite",
+            contents="\n\n".join([SYSTEM_PROMPT] + prompt_parts)
         )
         full_response = response.text
         sources_json = json.dumps(sources)
