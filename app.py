@@ -8,6 +8,7 @@ import psycopg2.extras
 from flask import Flask, render_template, request, jsonify, session
 import pdfplumber
 import google.generativeai as genai
+import google.ai.generativelanguage as glm
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
@@ -16,8 +17,18 @@ app.secret_key = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
-genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
-model = genai.GenerativeModel('gemini-1.5-flash')
+genai.configure(
+    api_key=os.environ.get("GOOGLE_API_KEY"),
+    client_options={"api_endpoint": "generativelanguage.googleapis.com"}
+)
+
+model = genai.GenerativeModel(
+    model_name="models/gemini-1.5-flash",
+    generation_config=genai.GenerationConfig(
+        temperature=0.3,
+        max_output_tokens=2048,
+    )
+)
 
 SYSTEM_PROMPT = """Name: Indonesia Law AI
 Goal: A RAG-based (Retrieval-Augmented Generation) system for querying Indonesian laws, regulations, and court decisions. An expert Indonesian legal research assistant specializing in corporate, investment, and business law. You reason carefully about Indonesian law using the frameworks below before answering any question.
