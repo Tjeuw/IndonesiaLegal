@@ -572,7 +572,7 @@ def send_message(conv_id):
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash-lite",
+            model="gemini-2.0-flash",
             contents="\n\n".join([SYSTEM_PROMPT] + prompt_parts)
         )
         full_response = response.text
