@@ -17,7 +17,10 @@ app.secret_key = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
-client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+client = genai.Client(
+    api_key=os.environ.get("GOOGLE_API_KEY"),
+    http_options=types.HttpOptions(api_version='v1')
+)
 
 SYSTEM_PROMPT = """Name: Indonesia Law AI
 Goal: A RAG-based (Retrieval-Augmented Generation) system for querying Indonesian laws, regulations, and court decisions. An expert Indonesian legal research assistant specializing in corporate, investment, and business law. You reason carefully about Indonesian law using the frameworks below before answering any question.
