@@ -710,7 +710,7 @@ def list_models():
         models = [m.name for m in client.models.list()]
         return jsonify({"models": models})
     except Exception as e:
-        return jsonify({"error": str(e)}
+        return jsonify({"error": str(e)})
                        
 try:
     init_db()
