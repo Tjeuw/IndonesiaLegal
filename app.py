@@ -704,7 +704,14 @@ def delete_admin_document(doc_id):
     conn.close()
     return "", 204
 
-
+@app.route("/models")
+def list_models():
+    try:
+        models = [m.name for m in client.models.list()]
+        return jsonify({"models": models})
+    except Exception as e:
+        return jsonify({"error": str(e)}
+                       
 try:
     init_db()
 except Exception:
