@@ -7,7 +7,8 @@ import psycopg2
 import psycopg2.extras
 from flask import Flask, render_template, request, jsonify, session
 import pdfplumber
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
@@ -16,17 +17,7 @@ app.secret_key = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
-genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
-
-model = genai.GenerativeModel(
-    model_name='gemini-1.5-flash',
-    generation_config={
-        "temperature": 0.3,
-        "top_p": 0.95,
-        "top_k": 40,
-        "max_output_tokens": 2048,
-    }
-)
+client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
 
 SYSTEM_PROMPT = """Name: Indonesia Law AI
 Goal: A RAG-based (Retrieval-Augmented Generation) system for querying Indonesian laws, regulations, and court decisions. An expert Indonesian legal research assistant specializing in corporate, investment, and business law. You reason carefully about Indonesian law using the frameworks below before answering any question.
@@ -570,10 +561,10 @@ def send_message(conv_id):
 
     rag_context, sources = build_rag_context(content, conversation_id=conv_id)
 
-    prompt_parts = [f"System: {SYSTEM_PROMPT}"]
+    prompt_parts = []
     if rag_context:
-        prompt_parts.append(f"User: {rag_context}")
-        prompt_parts.append("Assistant: I have reviewed the relevant legal document excerpts and will use them as primary reference sources.")
+        prompt_parts.append(rag_context)
+        prompt_parts.append("I have reviewed the relevant legal document excerpts and will use them as primary reference sources.")
     for m in history:
         if m["role"] == "user":
             prompt_parts.append(f"User: {m['content']}")
@@ -581,13 +572,20 @@ def send_message(conv_id):
             prompt_parts.append(f"Assistant: {m['content']}")
 
     try:
-        response = model.generate_content("\n".join(prompt_parts))
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents="\n".join(prompt_parts),
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.3,
+                max_output_tokens=2048,
+            )
+        )
         full_response = response.text
         sources_json = json.dumps(sources)
 
         conn2 = get_db()
         cur2 = conn2.cursor()
-        # Ensure sources column exists
         try:
             cur2.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS sources TEXT")
         except Exception:
