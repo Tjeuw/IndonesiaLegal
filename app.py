@@ -577,7 +577,7 @@ def send_message(conv_id):
     try:
         response = client.models.generate_content(
             model="gemini-1.5-flash",
-            contents="\n".join(prompt_parts),
+            contents=SYSTEM_PROMPT + "\n\n" + "\n".join(prompt_parts),
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
                 temperature=0.3,
