@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin Login — Indonesia Law AI</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="admin-login-page">
+  <div class="admin-login-box">
+    <div class="welcome-icon">⚖</div>
+    <h2>Admin Access</h2>
+    <p>Indonesia Law AI — Document Management</p>
+    <div class="admin-login-form">
+      <input type="password" id="admin-password-input" class="admin-input" placeholder="Enter admin password" autofocus>
+      <button class="admin-login-btn" id="admin-login-btn">Sign In</button>
+      <p class="admin-error" id="admin-error" style="display:none">Incorrect password. Please try again.</p>
+    </div>
+  </div>
+</div>
+<script>
+  document.getElementById('admin-login-btn').addEventListener('click', async () => {
+    const pw = document.getElementById('admin-password-input').value;
+    const err = document.getElementById('admin-error');
+    err.style.display = 'none';
+    const res = await fetch('/admin/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({password: pw})
+    });
+    if (res.ok) {
+      window.location.href = '/admin';
+    } else {
+      err.style.display = 'block';
+    }
+  });
+  document.getElementById('admin-password-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('admin-login-btn').click();
+  });
+</script>
+</body>
+</html>

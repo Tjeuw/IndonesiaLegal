@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin — Indonesia Law AI</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="admin-page">
+  <header class="admin-header">
+    <div class="logo">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+      </svg>
+      Indonesia Law AI — Admin
+    </div>
+    <div class="admin-header-actions">
+      <a href="/" class="admin-link-btn">← Back to App</a>
+      <button class="admin-logout-btn" id="admin-logout-btn">Sign Out</button>
+    </div>
+  </header>
+
+  <div class="admin-content">
+    <!-- Upload section -->
+    <div class="admin-card">
+      <h2>Upload Legal Document</h2>
+      <p class="admin-card-desc">Upload PDF or TXT files. Metadata will be auto-detected from the document content.</p>
+
+      <div class="admin-upload-zone" id="admin-upload-zone">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>
+        </svg>
+        <p>Drag & drop a PDF or TXT file here, or <label for="admin-file-input" class="upload-link">browse</label></p>
+        <input type="file" id="admin-file-input" accept=".pdf,.txt,.md" style="display:none">
+      </div>
+
+      <div id="admin-preview-section" style="display:none">
+        <h3>Document Preview</h3>
+        <div class="admin-form-grid">
+          <div class="admin-form-group">
+            <label>Title</label>
+            <input type="text" id="admin-title" class="admin-input">
+          </div>
+          <div class="admin-form-group">
+            <label>Document Type</label>
+            <select id="admin-doc-type" class="admin-input">
+              <option value="uu">UU (Undang-Undang)</option>
+              <option value="pp">PP (Peraturan Pemerintah)</option>
+              <option value="perpres">Perpres (Peraturan Presiden)</option>
+              <option value="permen">Permen (Peraturan Menteri)</option>
+              <option value="kepres">Kepres (Keputusan Presiden)</option>
+              <option value="perda">Perda (Peraturan Daerah)</option>
+              <option value="general" selected>General</option>
+            </select>
+          </div>
+          <div class="admin-form-group">
+            <label>Nomor & Tahun</label>
+            <input type="text" id="admin-nomor-tahun" class="admin-input" placeholder="e.g. Nomor 40 Tahun 2007">
+          </div>
+          <div class="admin-form-group">
+            <label>TEU (Issuing Body)</label>
+            <input type="text" id="admin-teu" class="admin-input">
+          </div>
+          <div class="admin-form-group">
+            <label>Subjek (Keywords)</label>
+            <input type="text" id="admin-subjek" class="admin-input">
+          </div>
+          <div class="admin-form-group">
+            <label>Status</label>
+            <select id="admin-status" class="admin-input">
+              <option value="berlaku">Berlaku (Active)</option>
+              <option value="diubah">Diubah (Amended)</option>
+              <option value="dicabut">Dicabut (Revoked)</option>
+            </select>
+          </div>
+        </div>
+        <div class="admin-form-group" style="margin-top:12px">
+          <label>Abstrak (Preview)</label>
+          <textarea id="admin-abstrak" class="admin-input admin-textarea" rows="3"></textarea>
+        </div>
+        <div class="admin-form-group" style="margin-top:12px">
+          <label>Dasar Hukum</label>
+          <textarea id="admin-dasar-hukum" class="admin-input admin-textarea" rows="2"></textarea>
+        </div>
+        <div class="admin-preview-info" id="admin-preview-info"></div>
+        <div class="admin-upload-actions">
+          <button class="admin-cancel-btn" id="admin-cancel-btn">Cancel</button>
+          <button class="admin-upload-btn" id="admin-upload-btn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+            Upload Document
+          </button>
+        </div>
+        <div class="admin-upload-status" id="admin-upload-status"></div>
+      </div>
+    </div>
+
+    <!-- Documents list -->
+    <div class="admin-card">
+      <div class="admin-card-header">
+        <h2>Knowledge Base Documents</h2>
+        <span class="admin-doc-count" id="admin-doc-count">0 documents</span>
+      </div>
+      <div id="admin-docs-list" class="admin-docs-list">
+        <div class="admin-empty">No documents uploaded yet.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/admin.js"></script>
+</body>
+</html>
