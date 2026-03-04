@@ -7,7 +7,7 @@ import psycopg2
 import psycopg2.extras
 from flask import Flask, render_template, request, jsonify, session
 import pdfplumber
-from google import genai
+import google.generativeai as genai
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
@@ -16,7 +16,8 @@ app.secret_key = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
-client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 SYSTEM_PROMPT = """Name: Indonesia Law AI
 Goal: A RAG-based (Retrieval-Augmented Generation) system for querying Indonesian laws, regulations, and court decisions. An expert Indonesian legal research assistant specializing in corporate, investment, and business law. You reason carefully about Indonesian law using the frameworks below before answering any question.
@@ -173,6 +174,24 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON document_chunks USING GIN(tsv)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON document_chunks(document_id)")
+
+    # Settings table for demo controls
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # Add messages.sources column if missing
+    cur.execute("""
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS sources TEXT
+    """)
+    # Default settings
+    cur.execute("INSERT INTO app_settings (key, value) VALUES ('demo_password_enabled', 'false') ON CONFLICT (key) DO NOTHING")
+    cur.execute("INSERT INTO app_settings (key, value) VALUES ('demo_password', '') ON CONFLICT (key) DO NOTHING")
+    cur.execute("INSERT INTO app_settings (key, value) VALUES ('message_limit_enabled', 'false') ON CONFLICT (key) DO NOTHING")
+    cur.execute("INSERT INTO app_settings (key, value) VALUES ('message_limit', '20') ON CONFLICT (key) DO NOTHING")
 
     cur.execute("SELECT COUNT(*) FROM conversations")
     if cur.fetchone()[0] == 0:
@@ -459,9 +478,70 @@ def is_admin():
     return session.get("admin_authenticated") == True
 
 
+def get_setting(key, default=""):
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row["value"] if row else default
+    except Exception:
+        return default
+
+
+def set_setting(key, value):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (%s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+    """, (key, value))
+    cur.close()
+    conn.close()
+
+
+def get_all_settings():
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT key, value FROM app_settings")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return {r["key"]: r["value"] for r in rows}
+
+
+def get_session_message_count(conv_id):
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM messages WHERE conversation_id = %s AND role = 'user'", (conv_id,))
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return count
+    except Exception:
+        return 0
+
+
 @app.route("/")
 def index():
+    if get_setting("demo_password_enabled") == "true":
+        demo_pw = get_setting("demo_password")
+        if demo_pw and session.get("demo_authenticated") != True:
+            return render_template("gate.html")
     return render_template("index.html")
+
+
+@app.route("/gate")
+def gate_page():
+    if get_setting("demo_password_enabled") != "true":
+        return render_template("index.html")
+    if session.get("demo_authenticated") == True:
+        return render_template("index.html")
+    return render_template("gate.html")
 
 
 @app.route("/admin")
@@ -545,6 +625,19 @@ def get_messages(conv_id):
 
 @app.route("/api/conversations/<int:conv_id>/messages", methods=["POST"])
 def send_message(conv_id):
+    # Check demo password gate
+    if get_setting("demo_password_enabled") == "true":
+        demo_pw = get_setting("demo_password")
+        if demo_pw and session.get("demo_authenticated") != True:
+            return jsonify({"error": "demo_gate", "message": "Demo access required"}), 403
+
+    # Check message limit
+    if get_setting("message_limit_enabled") == "true":
+        limit = int(get_setting("message_limit", "20"))
+        current_count = get_session_message_count(conv_id)
+        if current_count >= limit:
+            return jsonify({"error": "limit_reached", "message": f"Demo limit of {limit} messages reached.", "limit": limit, "count": current_count}), 429
+
     data = request.get_json() or {}
     content = data.get("content", "")
     if not content.strip():
@@ -560,10 +653,10 @@ def send_message(conv_id):
 
     rag_context, sources = build_rag_context(content, conversation_id=conv_id)
 
-    prompt_parts = []
+    prompt_parts = [f"System: {SYSTEM_PROMPT}"]
     if rag_context:
-        prompt_parts.append(rag_context)
-        prompt_parts.append("I have reviewed the relevant legal document excerpts and will use them as primary reference sources.")
+        prompt_parts.append(f"User: {rag_context}")
+        prompt_parts.append("Assistant: I have reviewed the relevant legal document excerpts and will use them as primary reference sources.")
     for m in history:
         if m["role"] == "user":
             prompt_parts.append(f"User: {m['content']}")
@@ -571,15 +664,13 @@ def send_message(conv_id):
             prompt_parts.append(f"Assistant: {m['content']}")
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents="\n\n".join([SYSTEM_PROMPT] + prompt_parts)
-        )
+        response = model.generate_content("\n".join(prompt_parts))
         full_response = response.text
         sources_json = json.dumps(sources)
 
         conn2 = get_db()
         cur2 = conn2.cursor()
+        # Ensure sources column exists
         try:
             cur2.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS sources TEXT")
         except Exception:
@@ -704,14 +795,69 @@ def delete_admin_document(doc_id):
     conn.close()
     return "", 204
 
-@app.route("/models")
-def list_models():
-    try:
-        models = [m.name for m in client.models.list()]
-        return jsonify({"models": models})
-    except Exception as e:
-        return jsonify({"error": str(e)})
-                       
+
+# ─── Demo gate auth ───────────────────────────────────────
+@app.route("/demo/login", methods=["POST"])
+def demo_login():
+    data = request.get_json() or {}
+    entered = data.get("password", "")
+    stored = get_setting("demo_password")
+    if get_setting("demo_password_enabled") != "true":
+        return jsonify({"success": True})
+    if entered == stored:
+        session["demo_authenticated"] = True
+        return jsonify({"success": True})
+    return jsonify({"error": "Incorrect demo password"}), 401
+
+
+@app.route("/api/demo/status", methods=["GET"])
+def demo_status():
+    """Returns current demo gate settings for the frontend."""
+    password_enabled = get_setting("demo_password_enabled") == "true"
+    limit_enabled = get_setting("message_limit_enabled") == "true"
+    limit = int(get_setting("message_limit", "20"))
+    authenticated = session.get("demo_authenticated") == True
+    return jsonify({
+        "password_enabled": password_enabled,
+        "password_required": password_enabled and not authenticated,
+        "limit_enabled": limit_enabled,
+        "message_limit": limit,
+    })
+
+
+@app.route("/api/conversations/<int:conv_id>/message_count", methods=["GET"])
+def get_message_count(conv_id):
+    count = get_session_message_count(conv_id)
+    limit_enabled = get_setting("message_limit_enabled") == "true"
+    limit = int(get_setting("message_limit", "20"))
+    return jsonify({
+        "count": count,
+        "limit": limit if limit_enabled else None,
+        "limit_enabled": limit_enabled,
+        "remaining": max(0, limit - count) if limit_enabled else None,
+    })
+
+
+# ─── Admin settings routes ─────────────────────────────────
+@app.route("/api/admin/settings", methods=["GET"])
+def get_settings():
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify(get_all_settings())
+
+
+@app.route("/api/admin/settings", methods=["POST"])
+def update_settings():
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json() or {}
+    allowed_keys = {"demo_password_enabled", "demo_password", "message_limit_enabled", "message_limit"}
+    for key, value in data.items():
+        if key in allowed_keys:
+            set_setting(key, str(value))
+    return jsonify({"success": True, "settings": get_all_settings()})
+
+
 try:
     init_db()
 except Exception:
