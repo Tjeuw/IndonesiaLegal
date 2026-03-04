@@ -182,3 +182,64 @@ async function handleFileSelection(file) {
     hidePreviewSection();
   }
 }
+
+// ─── Demo Controls ───────────────────────────────────────
+async function loadSettings() {
+  const res = await fetch('/api/admin/settings');
+  if (!res.ok) return;
+  const settings = await res.json();
+
+  const pwEnabled = settings.demo_password_enabled === 'true';
+  const limitEnabled = settings.message_limit_enabled === 'true';
+
+  document.getElementById('password-enabled-toggle').checked = pwEnabled;
+  document.getElementById('limit-enabled-toggle').checked = limitEnabled;
+  document.getElementById('demo-password-input').value = settings.demo_password || '';
+  document.getElementById('message-limit-input').value = settings.message_limit || '20';
+
+  document.getElementById('password-body').classList.toggle('visible', pwEnabled);
+  document.getElementById('limit-body').classList.toggle('visible', limitEnabled);
+}
+
+async function saveSetting(key, value) {
+  const status = document.getElementById('demo-save-status');
+  const res = await fetch('/api/admin/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({[key]: value})
+  });
+  if (res.ok) {
+    status.textContent = '✓ Saved';
+    status.className = 'demo-save-status success';
+  } else {
+    status.textContent = '✗ Failed to save';
+    status.className = 'demo-save-status error';
+  }
+  setTimeout(() => { status.textContent = ''; status.className = 'demo-save-status'; }, 2000);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadSettings();
+
+  document.getElementById('password-enabled-toggle').addEventListener('change', async (e) => {
+    document.getElementById('password-body').classList.toggle('visible', e.target.checked);
+    await saveSetting('demo_password_enabled', e.target.checked ? 'true' : 'false');
+  });
+
+  document.getElementById('limit-enabled-toggle').addEventListener('change', async (e) => {
+    document.getElementById('limit-body').classList.toggle('visible', e.target.checked);
+    await saveSetting('message_limit_enabled', e.target.checked ? 'true' : 'false');
+  });
+
+  document.getElementById('save-password-btn').addEventListener('click', async () => {
+    const pw = document.getElementById('demo-password-input').value.trim();
+    if (!pw) { alert('Please enter a password first.'); return; }
+    await saveSetting('demo_password', pw);
+  });
+
+  document.getElementById('save-limit-btn').addEventListener('click', async () => {
+    const limit = parseInt(document.getElementById('message-limit-input').value);
+    if (!limit || limit < 1) { alert('Please enter a valid number.'); return; }
+    await saveSetting('message_limit', limit.toString());
+  });
+});
