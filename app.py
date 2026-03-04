@@ -7,7 +7,7 @@ import psycopg2
 import psycopg2.extras
 from flask import Flask, render_template, request, jsonify, session
 import pdfplumber
-import google.generativeai as genai
+from google import genai
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
@@ -16,8 +16,7 @@ app.secret_key = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
-genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
-model = genai.GenerativeModel('gemini-1.5-flash')
+client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
 
 SYSTEM_PROMPT = """Name: Indonesia Law AI
 Goal: A RAG-based (Retrieval-Augmented Generation) system for querying Indonesian laws, regulations, and court decisions. An expert Indonesian legal research assistant specializing in corporate, investment, and business law. You reason carefully about Indonesian law using the frameworks below before answering any question.
@@ -175,7 +174,7 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON document_chunks USING GIN(tsv)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON document_chunks(document_id)")
 
-    # Settings table for demo controls
+    # Demo controls
     cur.execute("""
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
@@ -183,11 +182,7 @@ def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Add messages.sources column if missing
-    cur.execute("""
-        ALTER TABLE messages ADD COLUMN IF NOT EXISTS sources TEXT
-    """)
-    # Default settings
+    cur.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS sources TEXT")
     cur.execute("INSERT INTO app_settings (key, value) VALUES ('demo_password_enabled', 'false') ON CONFLICT (key) DO NOTHING")
     cur.execute("INSERT INTO app_settings (key, value) VALUES ('demo_password', '') ON CONFLICT (key) DO NOTHING")
     cur.execute("INSERT INTO app_settings (key, value) VALUES ('message_limit_enabled', 'false') ON CONFLICT (key) DO NOTHING")
@@ -205,6 +200,56 @@ def init_db():
     conn.close()
 
 
+# ─── Settings helpers ──────────────────────────────────────
+def get_setting(key, default=""):
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row["value"] if row else default
+    except Exception:
+        return default
+
+
+def set_setting(key, value):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (%s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+    """, (key, value))
+    cur.close()
+    conn.close()
+
+
+def get_all_settings():
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT key, value FROM app_settings")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return {r["key"]: r["value"] for r in rows}
+
+
+def get_session_message_count(conv_id):
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM messages WHERE conversation_id = %s AND role = 'user'", (conv_id,))
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return count
+    except Exception:
+        return 0
+
+
+# ─── Text helpers ──────────────────────────────────────────
 def fix_spaced_text(text):
     lines = text.split('\n')
     fixed_lines = []
@@ -246,7 +291,6 @@ def extract_metadata_from_text(text, filename=""):
         "abstrak": "", "dasar_hukum": ""
     }
     upper_text = text[:5000].upper()
-
     type_patterns = [
         (r'UNDANG[- ]?UNDANG\s+(?:REPUBLIK\s+INDONESIA\s+)?(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'uu'),
         (r'PERATURAN\s+PEMERINTAH\s+(?:REPUBLIK\s+INDONESIA\s+)?(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'pp'),
@@ -261,36 +305,30 @@ def extract_metadata_from_text(text, filename=""):
             metadata["doc_type"] = dtype
             metadata["nomor_tahun"] = f"Nomor {m.group(1)} Tahun {m.group(2)}"
             break
-
     if not metadata["nomor_tahun"]:
         gm = re.search(r'(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', upper_text)
         if gm:
             metadata["nomor_tahun"] = f"Nomor {gm.group(1)} Tahun {gm.group(2)}"
-
     tm = re.search(r'TENTANG\s+(.+?)(?:\n\n|\n[A-Z]{2,}|\nDENGAN|\nMENIMBANG|\nMEMUTUSKAN|\nBAB\s)', upper_text, re.DOTALL)
     if tm:
         t = re.sub(r'\s+', ' ', tm.group(1).strip())
         metadata["title"] = (t[:200] + "..." if len(t) > 200 else t).title()
     if not metadata["title"] and filename:
         metadata["title"] = filename.replace('.pdf', '').replace('.txt', '').replace('_', ' ')
-
     for tp in [r'PRESIDEN\s+REPUBLIK\s+INDONESIA', r'MENTERI\s+\w+(?:\s+\w+)*\s+REPUBLIK\s+INDONESIA',
                r'GUBERNUR\s+\w+', r'BUPATI\s+\w+', r'WALIKOTA\s+\w+']:
         tm2 = re.search(tp, upper_text)
         if tm2:
             metadata["teu"] = tm2.group(0).title()
             break
-
     mm = re.search(r'MENIMBANG\s*:?\s*(.+?)(?:MENGINGAT|MEMUTUSKAN)', upper_text, re.DOTALL)
     if mm:
         a = re.sub(r'\s+', ' ', mm.group(1).strip())
         metadata["abstrak"] = a[:1000] + ("..." if len(a) > 1000 else "")
-
     mg = re.search(r'MENGINGAT\s*:?\s*(.+?)(?:MEMUTUSKAN|MENETAPKAN|DENGAN\s+PERSETUJUAN)', upper_text, re.DOTALL)
     if mg:
         d = re.sub(r'\s+', ' ', mg.group(1).strip())
         metadata["dasar_hukum"] = d[:1000] + ("..." if len(d) > 1000 else "")
-
     keywords = ['INVESTASI', 'PENANAMAN MODAL', 'PERSEROAN', 'KETENAGAKERJAAN', 'PERPAJAKAN',
                 'PAJAK', 'PERTANAHAN', 'PERIZINAN', 'LINGKUNGAN', 'PERBANKAN', 'KEUANGAN',
                 'PERDAGANGAN', 'PERINDUSTRIAN', 'CIPTA KERJA', 'OMNIBUS', 'HAK ASASI',
@@ -298,12 +336,10 @@ def extract_metadata_from_text(text, filename=""):
     found = [kw.title() for kw in keywords if kw in upper_text[:3000]]
     if found:
         metadata["subjek"] = "; ".join(found[:5])
-
     if re.search(r'DICABUT\s+(?:DAN\s+)?(?:DINYATAKAN\s+)?TIDAK\s+BERLAKU|TIDAK\s+BERLAKU\s+LAGI', upper_text):
         metadata["status"] = "dicabut"
     elif re.search(r'PERUBAHAN\s+(?:ATAS|PERTAMA|KEDUA|KETIGA)|MENGUBAH\s+(?:BEBERAPA\s+)?KETENTUAN', upper_text):
         metadata["status"] = "diubah"
-
     return metadata
 
 
@@ -478,54 +514,7 @@ def is_admin():
     return session.get("admin_authenticated") == True
 
 
-def get_setting(key, default=""):
-    try:
-        conn = get_db()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        return row["value"] if row else default
-    except Exception:
-        return default
-
-
-def set_setting(key, value):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO app_settings (key, value, updated_at)
-        VALUES (%s, %s, CURRENT_TIMESTAMP)
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
-    """, (key, value))
-    cur.close()
-    conn.close()
-
-
-def get_all_settings():
-    conn = get_db()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT key, value FROM app_settings")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return {r["key"]: r["value"] for r in rows}
-
-
-def get_session_message_count(conv_id):
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM messages WHERE conversation_id = %s AND role = 'user'", (conv_id,))
-        count = cur.fetchone()[0]
-        cur.close()
-        conn.close()
-        return count
-    except Exception:
-        return 0
-
-
+# ─── Routes ───────────────────────────────────────────────
 @app.route("/")
 def index():
     if get_setting("demo_password_enabled") == "true":
@@ -542,6 +531,45 @@ def gate_page():
     if session.get("demo_authenticated") == True:
         return render_template("index.html")
     return render_template("gate.html")
+
+
+@app.route("/demo/login", methods=["POST"])
+def demo_login():
+    data = request.get_json() or {}
+    entered = data.get("password", "")
+    if get_setting("demo_password_enabled") != "true":
+        return jsonify({"success": True})
+    if entered == get_setting("demo_password"):
+        session["demo_authenticated"] = True
+        return jsonify({"success": True})
+    return jsonify({"error": "Incorrect demo password"}), 401
+
+
+@app.route("/api/demo/status", methods=["GET"])
+def demo_status():
+    password_enabled = get_setting("demo_password_enabled") == "true"
+    limit_enabled = get_setting("message_limit_enabled") == "true"
+    limit = int(get_setting("message_limit", "20"))
+    authenticated = session.get("demo_authenticated") == True
+    return jsonify({
+        "password_enabled": password_enabled,
+        "password_required": password_enabled and not authenticated,
+        "limit_enabled": limit_enabled,
+        "message_limit": limit,
+    })
+
+
+@app.route("/api/conversations/<int:conv_id>/message_count", methods=["GET"])
+def get_message_count(conv_id):
+    count = get_session_message_count(conv_id)
+    limit_enabled = get_setting("message_limit_enabled") == "true"
+    limit = int(get_setting("message_limit", "20"))
+    return jsonify({
+        "count": count,
+        "limit": limit if limit_enabled else None,
+        "limit_enabled": limit_enabled,
+        "remaining": max(0, limit - count) if limit_enabled else None,
+    })
 
 
 @app.route("/admin")
@@ -564,6 +592,25 @@ def admin_login():
 def admin_logout():
     session.pop("admin_authenticated", None)
     return jsonify({"success": True})
+
+
+@app.route("/api/admin/settings", methods=["GET"])
+def get_settings():
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify(get_all_settings())
+
+
+@app.route("/api/admin/settings", methods=["POST"])
+def update_settings():
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json() or {}
+    allowed_keys = {"demo_password_enabled", "demo_password", "message_limit_enabled", "message_limit"}
+    for key, value in data.items():
+        if key in allowed_keys:
+            set_setting(key, str(value))
+    return jsonify({"success": True, "settings": get_all_settings()})
 
 
 @app.route("/api/conversations", methods=["GET"])
@@ -653,10 +700,10 @@ def send_message(conv_id):
 
     rag_context, sources = build_rag_context(content, conversation_id=conv_id)
 
-    prompt_parts = [f"System: {SYSTEM_PROMPT}"]
+    prompt_parts = []
     if rag_context:
-        prompt_parts.append(f"User: {rag_context}")
-        prompt_parts.append("Assistant: I have reviewed the relevant legal document excerpts and will use them as primary reference sources.")
+        prompt_parts.append(rag_context)
+        prompt_parts.append("I have reviewed the relevant legal document excerpts and will use them as primary reference sources.")
     for m in history:
         if m["role"] == "user":
             prompt_parts.append(f"User: {m['content']}")
@@ -664,17 +711,15 @@ def send_message(conv_id):
             prompt_parts.append(f"Assistant: {m['content']}")
 
     try:
-        response = model.generate_content("\n".join(prompt_parts))
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents="\n\n".join([SYSTEM_PROMPT] + prompt_parts)
+        )
         full_response = response.text
         sources_json = json.dumps(sources)
 
         conn2 = get_db()
         cur2 = conn2.cursor()
-        # Ensure sources column exists
-        try:
-            cur2.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS sources TEXT")
-        except Exception:
-            pass
         cur2.execute(
             "INSERT INTO messages (conversation_id, role, content, sources) VALUES (%s, %s, %s, %s)",
             (conv_id, "assistant", full_response, sources_json)
@@ -796,66 +841,13 @@ def delete_admin_document(doc_id):
     return "", 204
 
 
-# ─── Demo gate auth ───────────────────────────────────────
-@app.route("/demo/login", methods=["POST"])
-def demo_login():
-    data = request.get_json() or {}
-    entered = data.get("password", "")
-    stored = get_setting("demo_password")
-    if get_setting("demo_password_enabled") != "true":
-        return jsonify({"success": True})
-    if entered == stored:
-        session["demo_authenticated"] = True
-        return jsonify({"success": True})
-    return jsonify({"error": "Incorrect demo password"}), 401
-
-
-@app.route("/api/demo/status", methods=["GET"])
-def demo_status():
-    """Returns current demo gate settings for the frontend."""
-    password_enabled = get_setting("demo_password_enabled") == "true"
-    limit_enabled = get_setting("message_limit_enabled") == "true"
-    limit = int(get_setting("message_limit", "20"))
-    authenticated = session.get("demo_authenticated") == True
-    return jsonify({
-        "password_enabled": password_enabled,
-        "password_required": password_enabled and not authenticated,
-        "limit_enabled": limit_enabled,
-        "message_limit": limit,
-    })
-
-
-@app.route("/api/conversations/<int:conv_id>/message_count", methods=["GET"])
-def get_message_count(conv_id):
-    count = get_session_message_count(conv_id)
-    limit_enabled = get_setting("message_limit_enabled") == "true"
-    limit = int(get_setting("message_limit", "20"))
-    return jsonify({
-        "count": count,
-        "limit": limit if limit_enabled else None,
-        "limit_enabled": limit_enabled,
-        "remaining": max(0, limit - count) if limit_enabled else None,
-    })
-
-
-# ─── Admin settings routes ─────────────────────────────────
-@app.route("/api/admin/settings", methods=["GET"])
-def get_settings():
-    if not is_admin():
-        return jsonify({"error": "Unauthorized"}), 401
-    return jsonify(get_all_settings())
-
-
-@app.route("/api/admin/settings", methods=["POST"])
-def update_settings():
-    if not is_admin():
-        return jsonify({"error": "Unauthorized"}), 401
-    data = request.get_json() or {}
-    allowed_keys = {"demo_password_enabled", "demo_password", "message_limit_enabled", "message_limit"}
-    for key, value in data.items():
-        if key in allowed_keys:
-            set_setting(key, str(value))
-    return jsonify({"success": True, "settings": get_all_settings()})
+@app.route("/models")
+def list_models():
+    try:
+        models = [m.name for m in client.models.list()]
+        return jsonify({"models": models})
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 try:
