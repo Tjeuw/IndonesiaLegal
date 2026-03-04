@@ -1,5 +1,6 @@
 import os
 import io
+import base64
 import json
 import re
 import secrets
@@ -276,11 +277,60 @@ def fix_spaced_text(text):
     return '\n'.join(fixed_lines)
 
 
+def ocr_page_with_gemini(page_image_bytes):
+    """Use Gemini Vision to OCR a scanned PDF page image."""
+    try:
+        image_b64 = base64.b64encode(page_image_bytes).decode("utf-8")
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[
+                {
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": "image/png",
+                                "data": image_b64
+                            }
+                        },
+                        {
+                            "text": "This is a page from an Indonesian legal document. Transcribe ALL text exactly as it appears, preserving the structure, numbering, and formatting. Do not summarize or interpret — just transcribe the full text."
+                        }
+                    ]
+                }
+            ]
+        )
+        return response.text or ""
+    except Exception as e:
+        return ""
+
+
 def extract_text_from_pdf(file_bytes):
+    """Extract text from PDF. Falls back to Gemini Vision OCR for scanned pages."""
     text = ""
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for page in pdf.pages:
-            text += page.extract_text() or ""
+    ocr_used = False
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text() or ""
+                # If less than 50 chars extracted, likely a scanned page — use OCR
+                if len(page_text.strip()) < 50:
+                    try:
+                        img = page.to_image(resolution=200)
+                        img_bytes = io.BytesIO()
+                        img.save(img_bytes, format="PNG")
+                        img_bytes.seek(0)
+                        ocr_text = ocr_page_with_gemini(img_bytes.read())
+                        if ocr_text.strip():
+                            text += ocr_text + chr(10)
+                            ocr_used = True
+                        else:
+                            text += page_text
+                    except Exception:
+                        text += page_text
+                else:
+                    text += page_text
+    except Exception as e:
+        raise e
     return fix_spaced_text(text)
 
 
