@@ -1,4 +1,4 @@
 flask
-google-generativeai
+google-genai
 pdfplumber
 psycopg2-binary
