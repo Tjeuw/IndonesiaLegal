@@ -193,8 +193,13 @@ async function createNewChat() {
     body: JSON.stringify({ title: t("newChat") })
   });
   const conv = await res.json();
+  currentConversationId = conv.id;
+  document.getElementById("chat-title").textContent = conv.title || t("newChat");
+  document.getElementById("welcome-screen").style.display = "none";
+  document.getElementById("messages").style.display = "block";
+  document.getElementById("messages").innerHTML = "";
   await loadConversations();
-  selectConversation(conv.id, conv.title);
+  closeSidebar();
 }
 
 async function deleteConversation(id) {
@@ -369,6 +374,10 @@ async function sendMessage(content) {
 
   isStreaming = true;
   updateSendButton();
+
+  // Ensure messages div is visible before appending
+  document.getElementById("welcome-screen").style.display = "none";
+  document.getElementById("messages").style.display = "block";
 
   if (pendingFiles.length > 0) await uploadPendingFiles(currentConversationId);
 
