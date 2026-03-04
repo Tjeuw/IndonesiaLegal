@@ -22,6 +22,64 @@
   </header>
 
   <div class="admin-content">
+    <!-- Demo Controls -->
+    <div class="admin-card">
+      <h2>Demo Access Controls</h2>
+      <p class="admin-card-desc">Control who can access the app and how much they can use it. Changes take effect immediately.</p>
+
+      <div class="demo-controls-grid">
+        <!-- Password gate -->
+        <div class="demo-control-block">
+          <div class="demo-control-header">
+            <div>
+              <div class="demo-control-title">Password Gate</div>
+              <div class="demo-control-desc">Require testers to enter a password before accessing the app</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="password-enabled-toggle">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="demo-control-body" id="password-body">
+            <label class="admin-form-group">
+              <span>Access Password</span>
+              <div class="password-input-row">
+                <input type="text" id="demo-password-input" class="admin-input" placeholder="e.g. pasal2024">
+                <button class="admin-upload-btn" id="save-password-btn">Save</button>
+              </div>
+            </label>
+            <p class="demo-control-hint">Share this password with your testers. They'll see a login screen before the app.</p>
+          </div>
+        </div>
+
+        <!-- Message limit -->
+        <div class="demo-control-block">
+          <div class="demo-control-header">
+            <div>
+              <div class="demo-control-title">Message Limit</div>
+              <div class="demo-control-desc">Limit how many messages each tester can send per conversation</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="limit-enabled-toggle">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="demo-control-body" id="limit-body">
+            <label class="admin-form-group">
+              <span>Max messages per conversation</span>
+              <div class="password-input-row">
+                <input type="number" id="message-limit-input" class="admin-input" min="1" max="500" placeholder="20">
+                <button class="admin-upload-btn" id="save-limit-btn">Save</button>
+              </div>
+            </label>
+            <p class="demo-control-hint">Testers will see a counter showing how many messages they have left.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="demo-save-status" id="demo-save-status"></div>
+    </div>
+
     <!-- Upload section -->
     <div class="admin-card">
       <h2>Upload Legal Document</h2>
