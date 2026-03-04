@@ -534,10 +534,10 @@ document.addEventListener("DOMContentLoaded", () => {
 async function checkDemoStatus() {
   try {
     const res = await fetch('/api/demo/status');
+    if (!res.ok) return;
     const data = await res.json();
     if (data.password_required) {
-      window.location.href = '/static/gate.html';
-      // Note: gate is served via template route below
+      window.location.href = '/gate';
     }
   } catch(e) {}
 }
