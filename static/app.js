@@ -173,6 +173,7 @@ async function selectConversation(id, title) {
   clearPendingFiles();
   loadConversations();
   await loadMessages(id);
+  updateMessageCounter(id);
   closeSidebar();
 }
 
@@ -192,8 +193,13 @@ async function createNewChat() {
     body: JSON.stringify({ title: t("newChat") })
   });
   const conv = await res.json();
+  currentConversationId = conv.id;
+  document.getElementById("chat-title").textContent = conv.title || t("newChat");
+  document.getElementById("welcome-screen").style.display = "none";
+  document.getElementById("messages").style.display = "block";
+  document.getElementById("messages").innerHTML = "";
   await loadConversations();
-  selectConversation(conv.id, conv.title);
+  closeSidebar();
 }
 
 async function deleteConversation(id) {
@@ -369,6 +375,10 @@ async function sendMessage(content) {
   isStreaming = true;
   updateSendButton();
 
+  // Ensure messages div is visible before appending
+  document.getElementById("welcome-screen").style.display = "none";
+  document.getElementById("messages").style.display = "block";
+
   if (pendingFiles.length > 0) await uploadPendingFiles(currentConversationId);
 
   if (!content.trim()) {
@@ -389,12 +399,17 @@ async function sendMessage(content) {
 
     const data = await res.json();
 
-    if (data.error) {
+    if (data.error === 'limit_reached') {
+      updateMessage(assistantDiv, `*Demo limit reached: ${data.message} Please contact the team for full access.*`);
+    } else if (data.error === 'demo_gate') {
+      window.location.href = '/gate';
+    } else if (data.error) {
       updateMessage(assistantDiv, `*Error: ${data.error}*`);
     } else {
       updateMessage(assistantDiv, data.content, data.sources || []);
     }
 
+    updateMessageCounter(currentConversationId);
     if (data.content) {
       const firstLine = content.substring(0, 40);
       const newTitle = firstLine + (content.length > 40 ? "..." : "");
@@ -448,6 +463,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initTheme();
   setLanguage(currentLang);
   loadConversations();
+  checkDemoStatus();
 
   document.getElementById("new-chat-btn").addEventListener("click", createNewChat);
   document.getElementById("theme-toggle-btn").addEventListener("click", toggleTheme);
@@ -522,3 +538,42 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("sidebar-overlay").addEventListener("click", closeSidebar);
 });
+
+/* ─── Demo Gate & Message Counter ─── */
+async function checkDemoStatus() {
+  try {
+    const res = await fetch('/api/demo/status');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.password_required) {
+      window.location.href = '/gate';
+    }
+  } catch(e) {}
+}
+
+async function updateMessageCounter(convId) {
+  if (!convId) return;
+  try {
+    const res = await fetch(`/api/conversations/${convId}/message_count`);
+    const data = await res.json();
+    renderMessageCounter(data);
+  } catch(e) {}
+}
+
+function renderMessageCounter(data) {
+  const existing = document.getElementById('message-counter');
+  if (existing) existing.remove();
+
+  if (!data.limit_enabled || data.limit === null) return;
+
+  const remaining = data.remaining;
+  const pct = data.count / data.limit;
+
+  const div = document.createElement('div');
+  div.id = 'message-counter';
+  div.className = 'message-counter' + (pct >= 0.9 ? ' critical' : pct >= 0.7 ? ' warning' : '');
+  div.innerHTML = `<span class="counter-dot"></span> ${remaining} message${remaining !== 1 ? 's' : ''} remaining in demo`;
+
+  const inputArea = document.getElementById('chat-input-area');
+  inputArea.insertBefore(div, inputArea.firstChild);
+}
