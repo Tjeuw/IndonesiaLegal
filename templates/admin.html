@@ -95,6 +95,16 @@
         <input type="file" id="admin-file-input" accept=".pdf,.txt,.md" style="display:none">
       </div>
 
+      <!-- Progress bar — shown during chunked uploads, hidden by default -->
+      <div id="upload-progress-bar" style="display:none; margin:16px 0;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+          <span id="upload-progress-text" style="font-size:13px; color:#555;"></span>
+        </div>
+        <div style="background:#e8e8e8; border-radius:6px; height:8px; overflow:hidden;">
+          <div id="upload-progress-fill" style="height:100%; width:0%; background:linear-gradient(90deg,#8B1A1A,#c0392b); border-radius:6px; transition:width 0.3s ease;"></div>
+        </div>
+      </div>
+
       <div id="admin-preview-section" style="display:none">
         <h3>Document Preview</h3>
         <div class="admin-form-grid">
