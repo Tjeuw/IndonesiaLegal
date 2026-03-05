@@ -136,7 +136,7 @@ def generate_embedding(text):
     """Generate a 768-dim embedding using Gemini text-embedding-004."""
     try:
         result = client.models.embed_content(
-            model="models/text-embedding-004",
+            model="text-embedding-004",
             contents=text
         )
         return result.embeddings[0].values
