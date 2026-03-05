@@ -18,16 +18,6 @@ async function loadDocuments() {
   list.innerHTML = docs.map(d => {
     const badgeClass = d.status === "berlaku" ? "badge-berlaku" : d.status === "diubah" ? "badge-diubah" : "badge-dicabut";
     const badgeLabel = d.status === "berlaku" ? "Active" : d.status === "diubah" ? "Amended" : "Revoked";
-    const embedded   = d.embedded_chunks || 0;
-    const total      = d.total_chunks || 0;
-    const fullyEmbedded = embedded >= total && total > 0;
-    const embedBadge = fullyEmbedded
-      ? `<span class="embed-badge embed-badge-done" title="${embedded}/${total} chunks embedded">⚡ Embedded</span>`
-      : `<span class="embed-badge embed-badge-pending" title="${embedded}/${total} chunks embedded">${embedded > 0 ? embedded + "/" + total : "No"} embeddings</span>`;
-    const embedBtn = fullyEmbedded ? "" : `
-      <button class="admin-embed-btn" id="embed-btn-${d.id}" onclick="embedDocument(${d.id}, ${total})" title="Generate embeddings for vector search">
-        ⚡ Generate Embeddings
-      </button>`;
     return `
     <div class="admin-doc-row" id="doc-row-${d.id}">
       <div class="admin-doc-info">
@@ -38,42 +28,16 @@ async function loadDocuments() {
           ${d.teu ? `<span>${escapeHtml(d.teu)}</span>` : ""}
           <span>${d.total_chunks} chunks</span>
           <span class="admin-doc-badge ${badgeClass}">${badgeLabel}</span>
-          ${embedBadge}
         </div>
-        <div id="embed-progress-${d.id}" class="embed-progress" style="display:none"></div>
       </div>
-      <div class="admin-doc-actions">
-        ${embedBtn}
-        <button class="admin-doc-delete" onclick="deleteDocument(${d.id})" title="Delete">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="3 6 5 6 21 6"/>
-            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-          </svg>
-        </button>
-      </div>
+      <button class="admin-doc-delete" onclick="deleteDocument(${d.id})" title="Delete">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+        </svg>
+      </button>
     </div>`;
   }).join("");
-}
-
-async function embedDocument(docId, totalChunks) {
-  const btn      = document.getElementById(`embed-btn-${docId}`);
-  const progress = document.getElementById(`embed-progress-${docId}`);
-  if (btn) { btn.disabled = true; btn.textContent = "Generating…"; }
-  if (progress) { progress.style.display = "block"; progress.textContent = "Calling Gemini embedding API — this may take several minutes for large documents…"; }
-  try {
-    const res = await fetch(`/api/admin/embed/${docId}`, { method: "POST" });
-    const data = await res.json();
-    if (res.ok) {
-      if (progress) progress.textContent = `✓ ${data.embedded} chunks embedded${data.errors > 0 ? `, ${data.errors} errors` : ""}`;
-      setTimeout(() => loadDocuments(), 1500);
-    } else {
-      if (progress) progress.textContent = `✗ Error: ${data.error}`;
-      if (btn) { btn.disabled = false; btn.textContent = "⚡ Generate Embeddings"; }
-    }
-  } catch (e) {
-    if (progress) progress.textContent = "✗ Network error. Please try again.";
-    if (btn) { btn.disabled = false; btn.textContent = "⚡ Generate Embeddings"; }
-  }
 }
 
 async function deleteDocument(id) {
@@ -87,7 +51,7 @@ async function deleteDocument(id) {
 }
 
 // ─── Chunked upload constants ────────────────────────────
-const CHUNK_SIZE = 1 * 1024 * 1024;  // 1MB per chunk — Railway 5min proxy limit
+const CHUNK_SIZE = 3 * 1024 * 1024;  // 3MB per chunk
 
 async function sha256(buffer) {
   const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
@@ -213,38 +177,8 @@ function showPreviewSection(metadata) {
   info.innerHTML = `
     <strong>${escapeHtml(metadata.filename)}</strong><br>
     ${metadata.text_length ? `${metadata.text_length.toLocaleString()} characters extracted` : ""}
+    ${metadata.text_preview ? `<br><br><em>Preview:</em> ${escapeHtml(metadata.text_preview)}` : ""}
   `;
-  // Chunk browser
-  const chunkBrowser = document.getElementById("admin-chunk-browser");
-  if (metadata.chunk_preview && metadata.chunk_preview.length > 0) {
-    const method = metadata.chunk_method === "pasal"
-      ? `<span class="chunk-method-badge chunk-method-pasal">Pasal-aware</span>`
-      : `<span class="chunk-method-badge chunk-method-paragraph">Paragraph</span>`;
-    const total   = metadata.chunk_count || metadata.chunk_preview.length;
-    const showing = metadata.chunk_preview.length;
-    const rows = metadata.chunk_preview.map((c, i) => {
-      const pasalRef = c.pasal_ref
-        ? `<span class="chunk-pasal-ref">${escapeHtml(c.pasal_ref)}</span>`
-        : `<span class="chunk-pasal-ref chunk-pasal-none">Chunk ${i + 1}</span>`;
-      const section = c.section_header
-        ? `<span class="chunk-section-header">${escapeHtml(c.section_header)}</span>` : "";
-      return `<div class="chunk-row">
-        <div class="chunk-row-meta">${pasalRef}${section}</div>
-        <div class="chunk-row-preview">${escapeHtml(c.preview)}</div>
-      </div>`;
-    }).join("");
-    chunkBrowser.innerHTML = `
-      <div class="chunk-browser-header">
-        <span>Chunk Structure ${method}</span>
-        <span class="chunk-count-label">${total.toLocaleString()} total — showing first ${showing}</span>
-      </div>
-      <div class="chunk-browser-list">${rows}</div>
-      ${total > showing ? `<div class="chunk-browser-more">+ ${(total - showing).toLocaleString()} more chunks</div>` : ""}
-    `;
-    chunkBrowser.style.display = "block";
-  } else {
-    chunkBrowser.style.display = "none";
-  }
 }
 
 function hidePreviewSection() {
