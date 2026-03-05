@@ -9,6 +9,11 @@ import psycopg2
 import psycopg2.extras
 from flask import Flask, render_template, request, jsonify, session
 import pdfplumber
+try:
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
 from google import genai
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -310,36 +315,60 @@ def ocr_page_with_gemini(page_image_bytes):
 
 
 def extract_text_from_pdf(file_bytes):
-    """Extract text from PDF page by page to minimise memory usage.
-    Falls back to Gemini Vision OCR for scanned pages."""
+    """Extract text from PDF using PyMuPDF (memory-efficient) with pdfplumber fallback."""
     import gc
-    pages_text = []
-    try:
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            total_pages = len(pdf.pages)
+
+    # PyMuPDF path — much more memory efficient for large documents
+    if PYMUPDF_AVAILABLE:
+        pages_text = []
+        try:
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            total_pages = len(doc)
             for page_num in range(total_pages):
                 try:
-                    page = pdf.pages[page_num]
-                    page_text = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
+                    page = doc[page_num]
+                    page_text = page.get_text("text") or ""
                     if len(page_text.strip()) < 50:
+                        # Scanned page — try OCR via Gemini
                         try:
-                            img = page.to_image(resolution=150)
-                            img_bytes = io.BytesIO()
-                            img.save(img_bytes, format="PNG")
-                            img_bytes.seek(0)
-                            ocr_text = ocr_page_with_gemini(img_bytes.read())
+                            pix = page.get_pixmap(dpi=150)
+                            img_bytes = pix.tobytes("png")
+                            ocr_text = ocr_page_with_gemini(img_bytes)
                             pages_text.append(ocr_text if ocr_text.strip() else page_text)
-                            del img, img_bytes
+                            del pix, img_bytes
                         except Exception:
                             pages_text.append(page_text)
                     else:
                         pages_text.append(page_text)
                     del page
-                    if page_num % 50 == 0:
+                    if page_num % 100 == 0:
                         gc.collect()
                 except Exception:
                     pages_text.append("")
                     continue
+            doc.close()
+            del doc
+        except Exception as e:
+            raise e
+        text = "".join(pages_text)
+        del pages_text
+        gc.collect()
+        return fix_spaced_text(text)
+
+    # Fallback: pdfplumber for smaller documents
+    pages_text = []
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page_num in range(len(pdf.pages)):
+                try:
+                    page = pdf.pages[page_num]
+                    page_text = page.extract_text() or ""
+                    pages_text.append(page_text)
+                    del page
+                    if page_num % 50 == 0:
+                        gc.collect()
+                except Exception:
+                    pages_text.append("")
     except Exception as e:
         raise e
     text = "".join(pages_text)
