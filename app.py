@@ -137,14 +137,28 @@ MAX_SEARCH_RESULTS = 5
 
 
 def generate_embedding(text):
-    """Generate a 768-dim embedding using gemini-embedding-001 (stable v1)."""
+    """Generate a 768-dim embedding via direct REST call to stable v1 API."""
     try:
-        result = client.models.embed_content(
-            model="gemini-embedding-001",
-            contents=text
+        import urllib.request as _req
+        import json as _json
+        api_key = os.environ.get("GOOGLE_API_KEY", "")
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "text-embedding-004:embedContent?key=" + api_key
         )
-        # Truncate to 768 dims to match existing schema (Matryoshka — safe to truncate)
-        return result.embeddings[0].values[:768]
+        payload = _json.dumps({
+            "model": "models/text-embedding-004",
+            "content": {"parts": [{"text": text[:8000]}]},
+            "taskType": "RETRIEVAL_DOCUMENT"
+        }).encode("utf-8")
+        request = _req.Request(
+            url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with _req.urlopen(request, timeout=30) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        return data["embedding"]["values"][:768]
     except Exception as e:
         print(f"[EMBED ERROR] {type(e).__name__}: {e}", flush=True)
         return None
@@ -1197,6 +1211,27 @@ def list_admin_documents():
     cur.close()
     conn.close()
     return jsonify(result)
+
+
+@app.route("/api/admin/list-models", methods=["GET"])
+def list_embedding_models():
+    """Diagnostic: list all models available via the API key."""
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        import urllib.request as _req
+        import json as _json
+        api_key = os.environ.get("GOOGLE_API_KEY", "")
+        url = "https://generativelanguage.googleapis.com/v1beta/models?key=" + api_key
+        with _req.urlopen(url, timeout=10) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        embedding_models = [
+            m["name"] for m in data.get("models", [])
+            if "embedContent" in m.get("supportedGenerationMethods", [])
+        ]
+        return jsonify({"embedding_models": embedding_models, "total": len(embedding_models)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/admin/embed/<int:doc_id>", methods=["POST"])
