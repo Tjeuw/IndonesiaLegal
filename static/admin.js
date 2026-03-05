@@ -284,7 +284,7 @@ async function uploadDocument() {
     }
 
     // ── Large file: finalize chunked upload ───────────────
-    setProgress(97, "Processing document — this may take a minute...");
+    setProgress(97, "Processing document — writing chunks to database...");
     btn.textContent = "Processing document...";
 
     const finalRes = await fetch("/api/admin/upload/finalize", {
@@ -307,9 +307,34 @@ async function uploadDocument() {
       const d = await finalRes.json();
       throw new Error(d.error || "Finalization failed");
     }
-    const result = await finalRes.json();
+
+    const finalData = await finalRes.json();
+
+    // If server returned 202, processing is in background — poll for completion
+    if (finalData.status === "processing") {
+      const uploadId = finalData.upload_id;
+      let elapsed = 0;
+      while (true) {
+        await new Promise(r => setTimeout(r, 3000));
+        elapsed += 3;
+        setProgress(98, `Processing document — ${elapsed}s elapsed...`);
+        const pollRes = await fetch(`/api/admin/upload/status/${uploadId}`);
+        const pollData = await pollRes.json();
+        if (pollData.status === "done") {
+          setProgress(100, "Complete");
+          showUploadSuccess(status, pollData.result);
+          return;
+        }
+        if (pollData.status === "error") {
+          throw new Error(pollData.error || "Processing failed");
+        }
+        // still "processing" — keep polling
+      }
+    }
+
+    // Synchronous response (small file fallback)
     setProgress(100, "Complete");
-    showUploadSuccess(status, result);
+    showUploadSuccess(status, finalData);
 
   } catch(e) {
     hideProgress();
