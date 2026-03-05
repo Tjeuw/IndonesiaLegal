@@ -1060,7 +1060,7 @@ def upload_chunk():
 
 @app.route("/api/admin/upload/preview", methods=["POST"])
 def upload_preview():
-    """Extract metadata and chunk structure preview from chunk 0."""
+    """Extract metadata and chunk structure preview from all received chunks."""
     if not is_admin():
         return jsonify({"error": "Unauthorized"}), 401
     upload_id = request.form.get("upload_id", "")
@@ -1069,8 +1069,7 @@ def upload_preview():
     upload = _chunk_uploads[upload_id]
     if upload["chunks"][0] is None:
         return jsonify({"error": "First chunk not yet received"}), 400
-    filename    = upload["filename"]
-    first_chunk = upload["chunks"][0]
+    filename = upload["filename"]
 
     class FileLike:
         def __init__(self, b, name):
@@ -1079,12 +1078,16 @@ def upload_preview():
         def read(self):
             return self._bytes
 
-    text, _, error = extract_text_from_file(FileLike(first_chunk, filename))
+    # Use all received chunks for better pasal detection on large files
+    received_bytes = b"".join(c for c in upload["chunks"] if c is not None)
+    text, _, error = extract_text_from_file(FileLike(received_bytes, filename))
     if error or not text:
-        text = ""
+        # Fallback to chunk 0 only
+        text, _, _ = extract_text_from_file(FileLike(upload["chunks"][0], filename))
+        text = text or ""
+
     metadata = extract_metadata_from_text(text, filename)
     metadata["filename"]             = filename
-    metadata["text_preview"]         = text[:500] + ("..." if len(text) > 500 else "")
     metadata["text_length"]          = upload["file_size"]
     metadata["total_chunks_to_send"] = upload["total"]
     pasal_chunks = extract_pasal_chunks(text)
