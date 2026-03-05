@@ -5,6 +5,8 @@ import hashlib
 import json
 import re
 import secrets
+import threading
+import time
 import psycopg2
 import psycopg2.extras
 from flask import Flask, render_template, request, jsonify, session
@@ -1263,46 +1265,90 @@ def list_embedding_models():
         return jsonify({"error": str(e)}), 500
 
 
+# Track background embedding jobs: doc_id -> {status, embedded, errors, total}
+_embed_jobs = {}
+
 @app.route("/api/admin/embed/<int:doc_id>", methods=["POST"])
 def embed_document(doc_id):
-    """Generate embeddings for all un-embedded chunks of a document, in batches of 50."""
+    """Kick off background embedding job and return immediately to avoid Railway timeout."""
     if not is_admin():
         return jsonify({"error": "Unauthorized"}), 401
+
     conn = get_db()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    # Verify document exists
     cur.execute("SELECT id, title, total_chunks FROM legal_documents WHERE id = %s AND scope = 'admin'", (doc_id,))
     doc = cur.fetchone()
     if not doc:
         cur.close(); conn.close()
         return jsonify({"error": "Document not found"}), 404
-    # Fetch chunks without embeddings
-    cur.execute("SELECT id, content FROM document_chunks WHERE document_id = %s AND embedding IS NULL ORDER BY chunk_index", (doc_id,))
-    chunks = cur.fetchall()
-    if not chunks:
-        cur.close(); conn.close()
-        return jsonify({"message": "All chunks already embedded", "embedded": 0, "total": doc["total_chunks"]})
-    embedded = 0
-    errors   = 0
-    for chunk in chunks:
-        emb = generate_embedding(chunk["content"])
-        if emb:
-            cur.execute("UPDATE document_chunks SET embedding = %s::vector WHERE id = %s", (str(emb), chunk["id"]))
-            embedded += 1
-        else:
-            errors += 1
-    # Create ivfflat index once enough vectors exist
-    try:
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)")
-    except Exception:
-        pass
+
+    cur.execute("SELECT COUNT(*) AS cnt FROM document_chunks WHERE document_id = %s AND embedding IS NULL", (doc_id,))
+    remaining = cur.fetchone()["cnt"]
     cur.close(); conn.close()
-    return jsonify({
-        "message": "Embedding complete",
-        "embedded": embedded,
-        "errors": errors,
-        "total": doc["total_chunks"]
-    })
+
+    if remaining == 0:
+        return jsonify({"message": "All chunks already embedded", "embedded": 0, "total": doc["total_chunks"]})
+
+    # If already running, return current status
+    if doc_id in _embed_jobs and _embed_jobs[doc_id]["status"] == "running":
+        return jsonify({"message": "Embedding already in progress", **_embed_jobs[doc_id]})
+
+    _embed_jobs[doc_id] = {"status": "running", "embedded": 0, "errors": 0, "total": remaining}
+
+    def run_embedding():
+        conn2 = get_db()
+        cur2  = conn2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cur2.execute("SELECT id, content FROM document_chunks WHERE document_id = %s AND embedding IS NULL ORDER BY chunk_index", (doc_id,))
+            chunks = cur2.fetchall()
+            for i, chunk in enumerate(chunks):
+                emb = generate_embedding(chunk["content"])
+                if emb:
+                    cur2.execute("UPDATE document_chunks SET embedding = %s::vector WHERE id = %s", (str(emb), chunk["id"]))
+                    _embed_jobs[doc_id]["embedded"] += 1
+                else:
+                    _embed_jobs[doc_id]["errors"] += 1
+
+                # Commit every 50 chunks so progress is saved incrementally
+                if (i + 1) % 50 == 0:
+                    conn2.commit()
+
+                # Small pause every 100 chunks to avoid Gemini rate limiting
+                if (i + 1) % 100 == 0:
+                    time.sleep(1)
+
+            conn2.commit()  # Final commit for remainder
+
+            # Create ivfflat index
+            try:
+                cur2.execute("CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)")
+                conn2.commit()
+            except Exception:
+                pass
+
+            _embed_jobs[doc_id]["status"] = "done"
+        except Exception as e:
+            conn2.rollback()
+            _embed_jobs[doc_id]["status"] = "error"
+            _embed_jobs[doc_id]["error_msg"] = str(e)
+            print(f"[EMBED JOB ERROR] {e}", flush=True)
+        finally:
+            cur2.close(); conn2.close()
+
+    threading.Thread(target=run_embedding, daemon=True).start()
+
+    return jsonify({"message": "Embedding started in background", "total": remaining, "status": "running"})
+
+
+@app.route("/api/admin/embed/status/<int:doc_id>", methods=["GET"])
+def embed_status(doc_id):
+    """Poll progress of a background embedding job."""
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    job = _embed_jobs.get(doc_id)
+    if not job:
+        return jsonify({"status": "not_started"})
+    return jsonify(job)
 
 
 @app.route("/api/admin/documents/preview", methods=["POST"])
