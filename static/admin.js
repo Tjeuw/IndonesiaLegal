@@ -160,7 +160,7 @@ async function previewFile(file) {
     // Store on file object so uploadDocument can finalize
     selectedFile._uploadId = upload_id;
 
-    // Send chunk 0 first (needed for metadata preview)
+    // Send chunk 0 first
     setProgress(12, `Uploading chunk 1 of ${total}...`);
     const fd0 = new FormData();
     fd0.append("upload_id",   upload_id);
@@ -169,17 +169,9 @@ async function previewFile(file) {
     const c0Res = await fetch("/api/admin/upload/chunk", { method: "POST", body: fd0 });
     if (!c0Res.ok) throw new Error("Failed to upload first chunk");
 
-    // Get metadata from chunk 0
-    setProgress(18, "Reading document metadata...");
-    const pvFd = new FormData();
-    pvFd.append("upload_id", upload_id);
-    const pvRes = await fetch("/api/admin/upload/preview", { method: "POST", body: pvFd });
-    if (!pvRes.ok) throw new Error("Failed to read file metadata");
-    const metadata = await pvRes.json();
-
     // Send remaining chunks
     for (let i = 1; i < total; i++) {
-      const pct = Math.round(18 + (i / total) * 76);
+      const pct = Math.round(12 + (i / total) * 78);
       setProgress(pct, `Uploading chunk ${i + 1} of ${total}...`);
       const fd = new FormData();
       fd.append("upload_id",   upload_id);
@@ -189,7 +181,15 @@ async function previewFile(file) {
       if (!cRes.ok) throw new Error(`Failed to upload chunk ${i + 1}`);
     }
 
-    setProgress(95, "All chunks received — ready to process");
+    // Get metadata + chunk preview AFTER all chunks received (full document available)
+    setProgress(95, "Reading document structure...");
+    const pvFd = new FormData();
+    pvFd.append("upload_id", upload_id);
+    const pvRes = await fetch("/api/admin/upload/preview", { method: "POST", body: pvFd });
+    if (!pvRes.ok) throw new Error("Failed to read file metadata");
+    const metadata = await pvRes.json();
+
+    setProgress(98, "All chunks received — ready to process");
     return metadata;
 
   } catch(e) {
