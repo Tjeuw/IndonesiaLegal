@@ -140,7 +140,8 @@ def generate_embedding(text):
             contents=text
         )
         return result.embeddings[0].values
-    except Exception:
+    except Exception as e:
+        print(f"[EMBED ERROR] {type(e).__name__}: {e}", flush=True)
         return None
 
 
