@@ -1,6 +1,7 @@
 import os
 import io
 import base64
+import hashlib
 import json
 import re
 import secrets
@@ -11,13 +12,17 @@ import pdfplumber
 from google import genai
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
-app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024  # 4MB — individual chunks are max 3MB
 app.secret_key = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
 client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+
+# In-memory store for chunked uploads
+# { upload_id: { chunks: [], total: N, received: N, filename: str, checksum: str, file_size: int } }
+_chunk_uploads = {}
 
 SYSTEM_PROMPT = """Name: Indonesia Law AI
 Goal: A RAG-based (Retrieval-Augmented Generation) system for querying Indonesian laws, regulations, and court decisions. An expert Indonesian legal research assistant specializing in corporate, investment, and business law. You reason carefully about Indonesian law using the frameworks below before answering any question.
@@ -315,12 +320,10 @@ def extract_text_from_pdf(file_bytes):
             for page_num in range(total_pages):
                 try:
                     page = pdf.pages[page_num]
-                    # Use lazy=False to avoid caching all page objects
                     page_text = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
                     if len(page_text.strip()) < 50:
-                        # Scanned page — try OCR
                         try:
-                            img = page.to_image(resolution=150)  # lower res = less memory
+                            img = page.to_image(resolution=150)
                             img_bytes = io.BytesIO()
                             img.save(img_bytes, format="PNG")
                             img_bytes.seek(0)
@@ -331,9 +334,7 @@ def extract_text_from_pdf(file_bytes):
                             pages_text.append(page_text)
                     else:
                         pages_text.append(page_text)
-                    # Explicitly release page object after each page
                     del page
-                    # Collect garbage every 50 pages to free memory
                     if page_num % 50 == 0:
                         gc.collect()
                 except Exception:
@@ -839,6 +840,141 @@ def delete_conversation_document(conv_id, doc_id):
     cur.close()
     conn.close()
     return "", 204
+
+
+@app.route("/api/admin/upload/init", methods=["POST"])
+def upload_init():
+    """Browser registers a new chunked upload session."""
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    data      = request.get_json() or {}
+    filename  = data.get("filename", "document.pdf")
+    total     = int(data.get("total_chunks", 1))
+    checksum  = data.get("checksum", "")
+    file_size = int(data.get("file_size", 0))
+    if not checksum:
+        return jsonify({"error": "Checksum required"}), 400
+    import uuid, time
+    upload_id = str(uuid.uuid4())
+    _chunk_uploads[upload_id] = {
+        "chunks":     [None] * total,
+        "total":      total,
+        "received":   0,
+        "filename":   filename,
+        "checksum":   checksum,
+        "file_size":  file_size,
+        "created_at": time.time(),
+    }
+    return jsonify({"upload_id": upload_id, "total_chunks": total})
+
+
+@app.route("/api/admin/upload/chunk", methods=["POST"])
+def upload_chunk():
+    """Receives one binary chunk (0-based index)."""
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    upload_id   = request.form.get("upload_id", "")
+    chunk_index = int(request.form.get("chunk_index", -1))
+    if upload_id not in _chunk_uploads:
+        return jsonify({"error": "Unknown upload_id — session may have expired"}), 404
+    if "chunk" not in request.files:
+        return jsonify({"error": "No chunk data"}), 400
+    upload = _chunk_uploads[upload_id]
+    if chunk_index < 0 or chunk_index >= upload["total"]:
+        return jsonify({"error": "Invalid chunk index"}), 400
+    upload["chunks"][chunk_index] = request.files["chunk"].read()
+    upload["received"] += 1
+    return jsonify({"received": upload["received"], "total": upload["total"]})
+
+
+@app.route("/api/admin/upload/preview", methods=["POST"])
+def upload_preview():
+    """Extract metadata from chunk 0 so the admin can review before finalising."""
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    upload_id = request.form.get("upload_id", "")
+    if upload_id not in _chunk_uploads:
+        return jsonify({"error": "Unknown upload_id"}), 404
+    upload = _chunk_uploads[upload_id]
+    if upload["chunks"][0] is None:
+        return jsonify({"error": "First chunk not yet received"}), 400
+    filename    = upload["filename"]
+    first_chunk = upload["chunks"][0]
+
+    class FileLike:
+        def __init__(self, b, name):
+            self.filename = name
+            self._bytes   = b
+        def read(self):
+            return self._bytes
+
+    text, _, error = extract_text_from_file(FileLike(first_chunk, filename))
+    if error or not text:
+        text = ""
+    metadata = extract_metadata_from_text(text, filename)
+    metadata["filename"]             = filename
+    metadata["text_preview"]         = text[:500] + ("..." if len(text) > 500 else "")
+    metadata["text_length"]          = upload["file_size"]
+    metadata["total_chunks_to_send"] = upload["total"]
+    return jsonify(metadata)
+
+
+@app.route("/api/admin/upload/finalize", methods=["POST"])
+def upload_finalize():
+    """All chunks received. Reassemble, verify SHA-256 checksum, process and store."""
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    data      = request.get_json() or {}
+    upload_id = data.get("upload_id", "")
+    if upload_id not in _chunk_uploads:
+        return jsonify({"error": "Unknown upload_id — session may have expired"}), 404
+    upload = _chunk_uploads[upload_id]
+
+    # Verify all chunks arrived
+    missing = [i for i, c in enumerate(upload["chunks"]) if c is None]
+    if missing:
+        return jsonify({"error": f"Missing chunks: {missing}. Please try uploading again."}), 400
+
+    # Reassemble
+    file_bytes = b"".join(upload["chunks"])
+
+    # Verify integrity
+    actual_checksum = hashlib.sha256(file_bytes).hexdigest()
+    if actual_checksum != upload["checksum"]:
+        del _chunk_uploads[upload_id]
+        return jsonify({"error": "Checksum mismatch — file was corrupted during upload. Please try again."}), 400
+
+    filename = upload["filename"]
+    metadata = {
+        "nomor_tahun": data.get("nomor_tahun", ""),
+        "teu":         data.get("teu", ""),
+        "subjek":      data.get("subjek", ""),
+        "status":      data.get("status", "berlaku"),
+        "abstrak":     data.get("abstrak", ""),
+        "dasar_hukum": data.get("dasar_hukum", ""),
+    }
+
+    class FileLike:
+        def __init__(self, b, name):
+            self.filename = name
+            self._bytes   = b
+        def read(self):
+            return self._bytes
+
+    result, error = process_and_store_document(
+        FileLike(file_bytes, filename),
+        data.get("title", ""), data.get("doc_type", "general"),
+        scope="admin", metadata=metadata
+    )
+    del _chunk_uploads[upload_id]
+
+    if error:
+        return jsonify({"error": error}), 400
+
+    result["verified"]     = True
+    result["checksum"]     = actual_checksum
+    result["file_size_mb"] = round(len(file_bytes) / (1024 * 1024), 1)
+    return jsonify(result), 201
 
 
 @app.route("/api/admin/documents", methods=["GET"])
