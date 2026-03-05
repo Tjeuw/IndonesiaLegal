@@ -137,17 +137,17 @@ MAX_SEARCH_RESULTS = 5
 
 
 def generate_embedding(text):
-    """Generate a 768-dim embedding via direct REST call to stable v1 API."""
+    """Generate embedding via direct REST call using gemini-embedding-001."""
     try:
         import urllib.request as _req
         import json as _json
         api_key = os.environ.get("GOOGLE_API_KEY", "")
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            "text-embedding-004:embedContent?key=" + api_key
+            "gemini-embedding-001:embedContent?key=" + api_key
         )
         payload = _json.dumps({
-            "model": "models/text-embedding-004",
+            "model": "models/gemini-embedding-001",
             "content": {"parts": [{"text": text[:8000]}]},
             "taskType": "RETRIEVAL_DOCUMENT"
         }).encode("utf-8")
