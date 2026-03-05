@@ -32,6 +32,7 @@ client = genai.Client(
 # In-memory store for chunked uploads
 # { upload_id: { chunks: [], total: N, received: N, filename: str, checksum: str, file_size: int } }
 _chunk_uploads = {}
+_processing_jobs = {}  # upload_id -> {"status", "result", "error"}
 
 SYSTEM_PROMPT = """Name: Indonesia Law AI
 Goal: A RAG-based (Retrieval-Augmented Generation) system for querying Indonesian laws, regulations, and court decisions. An expert Indonesian legal research assistant specializing in corporate, investment, and business law. You reason carefully about Indonesian law using the frameworks below before answering any question.
@@ -1131,7 +1132,7 @@ def upload_preview():
 
 @app.route("/api/admin/upload/finalize", methods=["POST"])
 def upload_finalize():
-    """All chunks received. Reassemble, verify SHA-256 checksum, process and store."""
+    """Reassemble, verify checksum, then process in background thread to avoid Railway 5-min timeout."""
     if not is_admin():
         return jsonify({"error": "Unauthorized"}), 401
     data      = request.get_json() or {}
@@ -1145,10 +1146,8 @@ def upload_finalize():
     if missing:
         return jsonify({"error": f"Missing chunks: {missing}. Please try uploading again."}), 400
 
-    # Reassemble
+    # Reassemble + verify checksum synchronously (fast)
     file_bytes = b"".join(upload["chunks"])
-
-    # Verify integrity
     actual_checksum = hashlib.sha256(file_bytes).hexdigest()
     if actual_checksum != upload["checksum"]:
         del _chunk_uploads[upload_id]
@@ -1163,6 +1162,12 @@ def upload_finalize():
         "abstrak":     data.get("abstrak", ""),
         "dasar_hukum": data.get("dasar_hukum", ""),
     }
+    title    = data.get("title", "")
+    doc_type = data.get("doc_type", "general")
+
+    # Mark job as processing and kick off background thread
+    _processing_jobs[upload_id] = {"status": "processing", "result": None, "error": None}
+    del _chunk_uploads[upload_id]
 
     class FileLike:
         def __init__(self, b, name):
@@ -1171,20 +1176,44 @@ def upload_finalize():
         def read(self):
             return self._bytes
 
-    result, error = process_and_store_document(
-        FileLike(file_bytes, filename),
-        data.get("title", ""), data.get("doc_type", "general"),
-        scope="admin", metadata=metadata
-    )
-    del _chunk_uploads[upload_id]
+    def do_process():
+        result, error = process_and_store_document(
+            FileLike(file_bytes, filename), title, doc_type,
+            scope="admin", metadata=metadata
+        )
+        if error:
+            _processing_jobs[upload_id]["status"] = "error"
+            _processing_jobs[upload_id]["error"]  = error
+        else:
+            result["verified"]     = True
+            result["checksum"]     = actual_checksum
+            result["file_size_mb"] = round(len(file_bytes) / (1024 * 1024), 1)
+            _processing_jobs[upload_id]["status"] = "done"
+            _processing_jobs[upload_id]["result"] = result
 
-    if error:
-        return jsonify({"error": error}), 400
+    import threading
+    threading.Thread(target=do_process, daemon=True).start()
 
-    result["verified"]     = True
-    result["checksum"]     = actual_checksum
-    result["file_size_mb"] = round(len(file_bytes) / (1024 * 1024), 1)
-    return jsonify(result), 201
+    # Return immediately — client polls /api/admin/upload/status/<upload_id>
+    return jsonify({"status": "processing", "upload_id": upload_id}), 202
+
+
+@app.route("/api/admin/upload/status/<upload_id>", methods=["GET"])
+def upload_status(upload_id):
+    """Poll this endpoint to check background processing status."""
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    if upload_id not in _processing_jobs:
+        return jsonify({"error": "Unknown upload_id"}), 404
+    job = _processing_jobs[upload_id]
+    if job["status"] == "processing":
+        return jsonify({"status": "processing"})
+    if job["status"] == "error":
+        del _processing_jobs[upload_id]
+        return jsonify({"status": "error", "error": job["error"]}), 400
+    result = job["result"]
+    del _processing_jobs[upload_id]
+    return jsonify({"status": "done", "result": result}), 201
 
 
 @app.route("/api/admin/documents", methods=["GET"])
