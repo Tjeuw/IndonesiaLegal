@@ -1,5 +1,5 @@
 flask
-google-genai>=0.8.0
+google-genai
 pdfplumber
 pymupdf
 psycopg2-binary
