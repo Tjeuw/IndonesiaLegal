@@ -15,6 +15,7 @@ try:
 except ImportError:
     PYMUPDF_AVAILABLE = False
 from google import genai
+from google.genai import types
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024  # 4MB — individual chunks are max 3MB
@@ -23,7 +24,10 @@ app.secret_key = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
-client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+client = genai.Client(
+    api_key=os.environ.get("GOOGLE_API_KEY"),
+    http_options=types.HttpOptions(api_version='v1')
+)
 
 # In-memory store for chunked uploads
 # { upload_id: { chunks: [], total: N, received: N, filename: str, checksum: str, file_size: int } }
@@ -133,13 +137,14 @@ MAX_SEARCH_RESULTS = 5
 
 
 def generate_embedding(text):
-    """Generate a 768-dim embedding using Gemini text-embedding-004."""
+    """Generate a 768-dim embedding using gemini-embedding-001 (stable v1)."""
     try:
         result = client.models.embed_content(
-            model="text-embedding-004",
+            model="gemini-embedding-001",
             contents=text
         )
-        return result.embeddings[0].values
+        # Truncate to 768 dims to match existing schema (Matryoshka — safe to truncate)
+        return result.embeddings[0].values[:768]
     except Exception as e:
         print(f"[EMBED ERROR] {type(e).__name__}: {e}", flush=True)
         return None
