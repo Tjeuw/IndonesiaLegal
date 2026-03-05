@@ -5,6 +5,8 @@ import hashlib
 import json
 import re
 import secrets
+import threading
+import time
 import psycopg2
 import psycopg2.extras
 from flask import Flask, render_template, request, jsonify, session
@@ -15,6 +17,7 @@ try:
 except ImportError:
     PYMUPDF_AVAILABLE = False
 from google import genai
+from google.genai import types
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024  # 4MB — individual chunks are max 3MB
@@ -23,11 +26,15 @@ app.secret_key = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
-client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+client = genai.Client(
+    api_key=os.environ.get("GOOGLE_API_KEY"),
+    http_options=types.HttpOptions(api_version='v1')
+)
 
 # In-memory store for chunked uploads
 # { upload_id: { chunks: [], total: N, received: N, filename: str, checksum: str, file_size: int } }
 _chunk_uploads = {}
+_processing_jobs = {}  # upload_id -> {"status", "result", "error"}
 
 SYSTEM_PROMPT = """Name: Indonesia Law AI
 Goal: A RAG-based (Retrieval-Augmented Generation) system for querying Indonesian laws, regulations, and court decisions. An expert Indonesian legal research assistant specializing in corporate, investment, and business law. You reason carefully about Indonesian law using the frameworks below before answering any question.
@@ -106,27 +113,121 @@ ALWAYS:
 
 WHEN LEGAL DOCUMENT REFERENCES ARE PROVIDED:
 - Treat excerpts as PRIMARY sources — cite them directly and accurately.
-- Quote specific passages when they directly answer the question.
-- Indicate which document the information comes from.
-- If excerpts don't fully answer the question, supplement with general knowledge, clearly distinguishing sourced vs general information.
+- Every legal claim MUST have an inline citation: (UU No. 40 Tahun 2007, Pasal 32 Ayat 1)
+- If the source chunk includes a pasal_ref label, use that exact reference.
+- For court decisions: cite page number and paragraph if available.
+- If excerpts don't fully answer the question, supplement with general knowledge, clearly marking it: [General knowledge — verify against primary source]
+- At the END of every answer using document references, include a ## Sources section listing each cited document with full title, nomor tahun, specific pasal/ayat cited, and status.
 
 NEVER:
 - Invent regulation numbers or pasal references.
 - Give a definitive answer requiring a licensed attorney's review.
 - Ignore the three-system framework.
+- Omit the Sources section when document references are provided.
 
 FORMAT:
 - Use ## for main section headers
 - Use numbered lists for requirements, steps, or ranked items
 - Use - bullet points for supporting details
 - Bold (**text**) for regulation names and key terms
-- End every answer with: "Verify with a licensed Indonesian attorney (Advokat) before taking legal action."
+- Always end with ## Sources (when documents cited), then: "Verify with a licensed Indonesian attorney (Advokat) before taking legal action."
 
 SECURITY: Maximum query length 500 characters."""
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 MAX_SEARCH_RESULTS = 5
+
+
+def generate_embeddings_batch(texts):
+    """Embed up to 100 texts in a single Gemini batchEmbedContents call.
+    Returns a list of vectors (same length as texts); None per slot on error."""
+    import urllib.request as _req
+    import json as _json
+    api_key = os.environ.get("GOOGLE_API_KEY", "")
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-embedding-001:batchEmbedContents?key=" + api_key
+    )
+    requests_payload = [
+        {
+            "model": "models/gemini-embedding-001",
+            "content": {"parts": [{"text": t[:8000]}]},
+            "taskType": "RETRIEVAL_DOCUMENT"
+        }
+        for t in texts
+    ]
+    try:
+        payload = _json.dumps({"requests": requests_payload}).encode("utf-8")
+        req = _req.Request(url, data=payload,
+                           headers={"Content-Type": "application/json"},
+                           method="POST")
+        with _req.urlopen(req, timeout=60) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        return [e["values"][:768] for e in data.get("embeddings", [])]
+    except Exception as e:
+        print(f"[BATCH EMBED ERROR] {type(e).__name__}: {e}", flush=True)
+        return [None] * len(texts)
+
+
+def generate_embedding(text):
+    """Single embedding — wraps batch call for backward compatibility."""
+    results = generate_embeddings_batch([text])
+    return results[0] if results else None
+
+
+def extract_pasal_chunks(text):
+    """Split text at Pasal/Ayat boundaries. Returns list of dicts or None."""
+    import gc
+    chunks = []
+    pasal_pattern = re.compile(r'(?:^|\n)((?:Pasal|PASAL)\s+\d+[A-Z]?)\s*\n', re.MULTILINE)
+    bab_pattern   = re.compile(r'(?:^|\n)((?:BAB|Bab)\s+[IVXLC\d]+[^\n]*)\s*\n', re.MULTILINE)
+    pasal_matches = list(pasal_pattern.finditer(text))
+    if not pasal_matches:
+        return None
+    bab_positions = {m.start(): m.group(1).strip() for m in bab_pattern.finditer(text)}
+    def get_section_header(pos):
+        headers = [v for k, v in bab_positions.items() if k <= pos]
+        return headers[-1] if headers else ""
+    for i, match in enumerate(pasal_matches):
+        pasal_ref  = match.group(1).strip()
+        start      = match.end()
+        end        = pasal_matches[i+1].start() if i+1 < len(pasal_matches) else len(text)
+        pasal_text = text[start:end].strip()
+        if not pasal_text:
+            continue
+        section_header = get_section_header(match.start())
+        if len(pasal_text) > CHUNK_SIZE:
+            ayat_pattern = re.compile(r'(?:^|\n)\((\d+)\)\s', re.MULTILINE)
+            ayat_matches = list(ayat_pattern.finditer(pasal_text))
+            if ayat_matches:
+                for j, am in enumerate(ayat_matches):
+                    ayat_num  = am.group(1)
+                    a_start   = am.start()
+                    a_end     = ayat_matches[j+1].start() if j+1 < len(ayat_matches) else len(pasal_text)
+                    ayat_text = pasal_text[a_start:a_end].strip()
+                    if ayat_text:
+                        chunks.append({
+                            "content": pasal_ref + " Ayat (" + ayat_num + ")\n" + ayat_text,
+                            "pasal_ref": pasal_ref + " Ayat (" + ayat_num + ")",
+                            "section_header": section_header
+                        })
+            else:
+                sentences = pasal_text.split('. ')
+                current = pasal_ref + "\n"
+                for sent in sentences:
+                    if len(current) + len(sent) < CHUNK_SIZE:
+                        current += sent + '. '
+                    else:
+                        if current.strip():
+                            chunks.append({"content": current.strip(), "pasal_ref": pasal_ref, "section_header": section_header})
+                        current = pasal_ref + " (lanjutan)\n" + sent + '. '
+                if current.strip():
+                    chunks.append({"content": current.strip(), "pasal_ref": pasal_ref, "section_header": section_header})
+        else:
+            chunks.append({"content": pasal_ref + "\n" + pasal_text, "pasal_ref": pasal_ref, "section_header": section_header})
+    gc.collect()
+    return chunks if chunks else None
 
 
 def get_db():
@@ -178,12 +279,24 @@ def init_db():
             document_id INTEGER NOT NULL REFERENCES legal_documents(id) ON DELETE CASCADE,
             chunk_index INTEGER NOT NULL,
             content TEXT NOT NULL,
+            pasal_ref TEXT DEFAULT '',
+            section_header TEXT DEFAULT '',
+            page_number INTEGER DEFAULT NULL,
             tsv tsvector,
+            embedding vector(768),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON document_chunks USING GIN(tsv)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON document_chunks(document_id)")
+    try:
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        cur.execute("ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS embedding vector(768)")
+        cur.execute("ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS pasal_ref TEXT DEFAULT ''")
+        cur.execute("ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS section_header TEXT DEFAULT ''")
+        cur.execute("ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS page_number INTEGER DEFAULT NULL")
+    except Exception:
+        pass
 
     # Demo controls
     cur.execute("""
@@ -490,17 +603,23 @@ def extract_text_from_file(file):
 
 
 def process_and_store_document(file, title, doc_type, scope="admin", conversation_id=None, metadata=None):
+    """Store document chunks immediately. Embeddings generated separately via /api/admin/embed/<doc_id>."""
     text, filename, error = extract_text_from_file(file)
     if error:
         return None, error
     if metadata is None:
         metadata = {}
-    chunks = chunk_text(text)
-    if not chunks:
+    pasal_chunks = extract_pasal_chunks(text)
+    if pasal_chunks:
+        chunk_dicts = pasal_chunks
+    else:
+        chunk_dicts = [{"content": c, "pasal_ref": "", "section_header": ""} for c in chunk_text(text)]
+    if not chunk_dicts:
         return None, "No content chunks could be created from the file."
     abstrak_text = metadata.get("abstrak", "")
     if abstrak_text:
-        chunks.insert(0, f"[ABSTRAK / RINGKASAN DOKUMEN]\n{abstrak_text}")
+        chunk_dicts.insert(0, {"content": "[ABSTRAK / RINGKASAN DOKUMEN]\n" + abstrak_text,
+                               "pasal_ref": "Abstrak", "section_header": ""})
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
@@ -509,17 +628,30 @@ def process_and_store_document(file, title, doc_type, scope="admin", conversatio
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
            RETURNING id, filename, title, doc_type, scope, total_chunks,
                nomor_tahun, teu, subjek, status, abstrak, dasar_hukum, uploaded_at""",
-        (filename, title or filename, doc_type, scope, conversation_id, len(chunks),
+        (filename, title or filename, doc_type, scope, conversation_id, len(chunk_dicts),
          metadata.get("nomor_tahun", ""), metadata.get("teu", ""),
          metadata.get("subjek", ""), metadata.get("status", "berlaku"),
          abstrak_text, metadata.get("dasar_hukum", ""))
     )
     doc = cur.fetchone()
-    for i, chunk_content in enumerate(chunks):
-        cur.execute(
-            "INSERT INTO document_chunks (document_id, chunk_index, content, tsv) VALUES (%s, %s, %s, to_tsvector('simple', %s))",
-            (doc["id"], i, chunk_content, chunk_content)
-        )
+    # Batch insert all chunks — much faster than one-by-one for large documents
+    rows = [
+        (doc["id"], i,
+         chunk.get("content", ""),
+         chunk.get("pasal_ref", ""),
+         chunk.get("section_header", ""),
+         chunk.get("content", ""))
+        for i, chunk in enumerate(chunk_dicts)
+    ]
+    psycopg2.extras.execute_batch(
+        cur,
+        """INSERT INTO document_chunks
+           (document_id, chunk_index, content, pasal_ref, section_header, tsv)
+           VALUES (%s, %s, %s, %s, %s, to_tsvector('simple', %s))""",
+        rows,
+        page_size=500
+    )
+    conn.commit()
     cur.close()
     conn.close()
     return {
@@ -531,44 +663,91 @@ def process_and_store_document(file, title, doc_type, scope="admin", conversatio
     }, None
 
 
+
 def search_documents(query, conversation_id=None, limit=MAX_SEARCH_RESULTS):
+    """Hybrid search: vector similarity first, keyword fallback if no embeddings."""
+    embedding = generate_embedding(query)
     conn = get_db()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    if embedding:
+        try:
+            vec_str = str(embedding)
+            if conversation_id:
+                cur.execute("""
+                    SELECT dc.content, dc.chunk_index,
+                           COALESCE(dc.pasal_ref,'') AS pasal_ref,
+                           COALESCE(dc.section_header,'') AS section_header,
+                           dc.page_number,
+                           ld.title AS doc_title, ld.filename, ld.scope,
+                           ld.nomor_tahun, ld.status AS doc_status, ld.doc_type,
+                           (1 - (dc.embedding <=> %s::vector))
+                               * CASE WHEN ld.status='berlaku' THEN 1.2
+                                      WHEN ld.status='diubah'  THEN 1.1 ELSE 0.9 END AS rank
+                    FROM document_chunks dc JOIN legal_documents ld ON dc.document_id = ld.id
+                    WHERE dc.embedding IS NOT NULL
+                      AND (ld.scope='admin' OR (ld.scope='user' AND ld.conversation_id=%s))
+                    ORDER BY dc.embedding <=> %s::vector LIMIT %s
+                """, (vec_str, conversation_id, vec_str, limit))
+            else:
+                cur.execute("""
+                    SELECT dc.content, dc.chunk_index,
+                           COALESCE(dc.pasal_ref,'') AS pasal_ref,
+                           COALESCE(dc.section_header,'') AS section_header,
+                           dc.page_number,
+                           ld.title AS doc_title, ld.filename, ld.scope,
+                           ld.nomor_tahun, ld.status AS doc_status, ld.doc_type,
+                           (1 - (dc.embedding <=> %s::vector))
+                               * CASE WHEN ld.status='berlaku' THEN 1.2
+                                      WHEN ld.status='diubah'  THEN 1.1 ELSE 0.9 END AS rank
+                    FROM document_chunks dc JOIN legal_documents ld ON dc.document_id = ld.id
+                    WHERE dc.embedding IS NOT NULL AND ld.scope='admin'
+                    ORDER BY dc.embedding <=> %s::vector LIMIT %s
+                """, (vec_str, vec_str, limit))
+            results = cur.fetchall()
+            if results:
+                cur.close(); conn.close()
+                return [r for r in results if r['scope']=='admin'], [r for r in results if r['scope']=='user']
+        except Exception:
+            pass
+    # Keyword fallback
     search_terms = [t for t in re.sub(r'[^\w\s]', ' ', query).split() if len(t) > 1]
     if not search_terms:
-        cur.close()
-        conn.close()
+        cur.close(); conn.close()
         return [], []
     if conversation_id:
         cur.execute("""
-            SELECT dc.content, dc.chunk_index, ld.title AS doc_title, ld.filename,
-                   ld.scope, ld.nomor_tahun, ld.status AS doc_status, ld.doc_type,
-                   ts_rank_cd(dc.tsv, plainto_tsquery('simple', %s))
-                       * CASE WHEN ld.status = 'berlaku' THEN 1.5
-                              WHEN ld.status = 'diubah' THEN 1.2 ELSE 0.8 END AS rank
+            SELECT dc.content, dc.chunk_index,
+                   COALESCE(dc.pasal_ref,'') AS pasal_ref,
+                   COALESCE(dc.section_header,'') AS section_header,
+                   dc.page_number,
+                   ld.title AS doc_title, ld.filename, ld.scope,
+                   ld.nomor_tahun, ld.status AS doc_status, ld.doc_type,
+                   ts_rank_cd(dc.tsv, plainto_tsquery('simple',%s))
+                       * CASE WHEN ld.status='berlaku' THEN 1.5
+                              WHEN ld.status='diubah'  THEN 1.2 ELSE 0.8 END AS rank
             FROM document_chunks dc JOIN legal_documents ld ON dc.document_id = ld.id
-            WHERE dc.tsv @@ plainto_tsquery('simple', %s)
-              AND ts_rank_cd(dc.tsv, plainto_tsquery('simple', %s)) > 0.001
-              AND (ld.scope = 'admin' OR (ld.scope = 'user' AND ld.conversation_id = %s))
+            WHERE dc.tsv @@ plainto_tsquery('simple',%s)
+              AND (ld.scope='admin' OR (ld.scope='user' AND ld.conversation_id=%s))
             ORDER BY rank DESC LIMIT %s
-        """, (query, query, query, conversation_id, limit))
+        """, (query, query, conversation_id, limit))
     else:
         cur.execute("""
-            SELECT dc.content, dc.chunk_index, ld.title AS doc_title, ld.filename,
-                   ld.scope, ld.nomor_tahun, ld.status AS doc_status, ld.doc_type,
-                   ts_rank_cd(dc.tsv, plainto_tsquery('simple', %s))
-                       * CASE WHEN ld.status = 'berlaku' THEN 1.5
-                              WHEN ld.status = 'diubah' THEN 1.2 ELSE 0.8 END AS rank
+            SELECT dc.content, dc.chunk_index,
+                   COALESCE(dc.pasal_ref,'') AS pasal_ref,
+                   COALESCE(dc.section_header,'') AS section_header,
+                   dc.page_number,
+                   ld.title AS doc_title, ld.filename, ld.scope,
+                   ld.nomor_tahun, ld.status AS doc_status, ld.doc_type,
+                   ts_rank_cd(dc.tsv, plainto_tsquery('simple',%s))
+                       * CASE WHEN ld.status='berlaku' THEN 1.5
+                              WHEN ld.status='diubah'  THEN 1.2 ELSE 0.8 END AS rank
             FROM document_chunks dc JOIN legal_documents ld ON dc.document_id = ld.id
-            WHERE dc.tsv @@ plainto_tsquery('simple', %s)
-              AND ts_rank_cd(dc.tsv, plainto_tsquery('simple', %s)) > 0.001
-              AND ld.scope = 'admin'
+            WHERE dc.tsv @@ plainto_tsquery('simple',%s) AND ld.scope='admin'
             ORDER BY rank DESC LIMIT %s
-        """, (query, query, query, limit))
+        """, (query, query, limit))
     results = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [r for r in results if r['scope'] == 'admin'], [r for r in results if r['scope'] == 'user']
+    cur.close(); conn.close()
+    return [r for r in results if r['scope']=='admin'], [r for r in results if r['scope']=='user']
 
 
 def build_rag_context(query, conversation_id=None):
@@ -580,25 +759,28 @@ def build_rag_context(query, conversation_id=None):
     if admin_results:
         context_parts.append("--- LEGAL KNOWLEDGE BASE ---")
         for i, r in enumerate(admin_results, 1):
-            sanitized = r['content'].replace("[DOCUMENT REFERENCE DATA", "").replace("[END DOCUMENT REFERENCE DATA]", "")
-            header = f"Source {i} — {r['doc_title']}"
-            if r.get('nomor_tahun'):
-                header += f" ({r['nomor_tahun']})"
-            status_label = {'berlaku': 'Active', 'diubah': 'Amended', 'dicabut': 'Revoked'}.get(r.get('doc_status', ''), r.get('doc_status', ''))
-            if status_label:
-                header += f" [{status_label}]"
-            context_parts.append(header + ":")
-            context_parts.append(sanitized)
-            context_parts.append("")
-            sources.append({"title": r['doc_title'], "nomor_tahun": r.get('nomor_tahun', ''), "status": r.get('doc_status', '')})
+            sanitized      = r['content'].replace("[DOCUMENT REFERENCE DATA", "").replace("[END DOCUMENT REFERENCE DATA]", "")
+            pasal_ref      = r.get('pasal_ref', '')
+            section_header = r.get('section_header', '')
+            header = "Source " + str(i) + " — " + r['doc_title']
+            if r.get('nomor_tahun'):  header += " (" + r['nomor_tahun'] + ")"
+            if pasal_ref:             header += " | " + pasal_ref
+            if section_header:        header += " [" + section_header + "]"
+            status_label = {'berlaku':'Active','diubah':'Amended','dicabut':'Revoked'}.get(r.get('doc_status',''), r.get('doc_status',''))
+            if status_label:          header += " [" + status_label + "]"
+            context_parts += [header + ":", sanitized, ""]
+            sources.append({"title": r['doc_title'], "nomor_tahun": r.get('nomor_tahun',''),
+                            "status": r.get('doc_status',''), "pasal_ref": pasal_ref,
+                            "section_header": section_header})
     if user_results:
         context_parts.append("--- USER-UPLOADED DOCUMENTS ---")
         for i, r in enumerate(user_results, 1):
             sanitized = r['content'].replace("[DOCUMENT REFERENCE DATA", "").replace("[END DOCUMENT REFERENCE DATA]", "")
-            context_parts.append(f"User Document {i} — {r['doc_title']}:")
-            context_parts.append(sanitized)
-            context_parts.append("")
-            sources.append({"title": r['doc_title'], "nomor_tahun": "", "status": "user"})
+            pasal_ref = r.get('pasal_ref', '')
+            header = "User Document " + str(i) + " — " + r['doc_title']
+            if pasal_ref: header += " | " + pasal_ref
+            context_parts += [header + ":", sanitized, ""]
+            sources.append({"title": r['doc_title'], "nomor_tahun": "", "status": "user", "pasal_ref": pasal_ref})
     context_parts.append("[END DOCUMENT REFERENCE DATA]")
     return "\n".join(context_parts), sources
 
@@ -918,7 +1100,7 @@ def upload_chunk():
 
 @app.route("/api/admin/upload/preview", methods=["POST"])
 def upload_preview():
-    """Extract metadata from chunk 0 so the admin can review before finalising."""
+    """Extract metadata and chunk structure preview from all received chunks."""
     if not is_admin():
         return jsonify({"error": "Unauthorized"}), 401
     upload_id = request.form.get("upload_id", "")
@@ -927,8 +1109,7 @@ def upload_preview():
     upload = _chunk_uploads[upload_id]
     if upload["chunks"][0] is None:
         return jsonify({"error": "First chunk not yet received"}), 400
-    filename    = upload["filename"]
-    first_chunk = upload["chunks"][0]
+    filename = upload["filename"]
 
     class FileLike:
         def __init__(self, b, name):
@@ -937,20 +1118,40 @@ def upload_preview():
         def read(self):
             return self._bytes
 
-    text, _, error = extract_text_from_file(FileLike(first_chunk, filename))
+    # Use all received chunks for better pasal detection on large files
+    received_bytes = b"".join(c for c in upload["chunks"] if c is not None)
+    text, _, error = extract_text_from_file(FileLike(received_bytes, filename))
     if error or not text:
-        text = ""
+        # Fallback to chunk 0 only
+        text, _, _ = extract_text_from_file(FileLike(upload["chunks"][0], filename))
+        text = text or ""
+
     metadata = extract_metadata_from_text(text, filename)
     metadata["filename"]             = filename
-    metadata["text_preview"]         = text[:500] + ("..." if len(text) > 500 else "")
     metadata["text_length"]          = upload["file_size"]
     metadata["total_chunks_to_send"] = upload["total"]
+    pasal_chunks = extract_pasal_chunks(text)
+    if pasal_chunks:
+        metadata["chunk_method"]  = "pasal"
+        metadata["chunk_count"]   = len(pasal_chunks)
+        metadata["chunk_preview"] = [
+            {"pasal_ref": c["pasal_ref"], "section_header": c["section_header"], "preview": c["content"][:200]}
+            for c in pasal_chunks[:20]
+        ]
+    else:
+        plain = chunk_text(text)
+        metadata["chunk_method"]  = "paragraph"
+        metadata["chunk_count"]   = len(plain)
+        metadata["chunk_preview"] = [
+            {"pasal_ref": "", "section_header": "", "preview": c[:200]}
+            for c in plain[:20]
+        ]
     return jsonify(metadata)
 
 
 @app.route("/api/admin/upload/finalize", methods=["POST"])
 def upload_finalize():
-    """All chunks received. Reassemble, verify SHA-256 checksum, process and store."""
+    """Reassemble, verify checksum, then process in background thread to avoid Railway 5-min timeout."""
     if not is_admin():
         return jsonify({"error": "Unauthorized"}), 401
     data      = request.get_json() or {}
@@ -964,10 +1165,8 @@ def upload_finalize():
     if missing:
         return jsonify({"error": f"Missing chunks: {missing}. Please try uploading again."}), 400
 
-    # Reassemble
+    # Reassemble + verify checksum synchronously (fast)
     file_bytes = b"".join(upload["chunks"])
-
-    # Verify integrity
     actual_checksum = hashlib.sha256(file_bytes).hexdigest()
     if actual_checksum != upload["checksum"]:
         del _chunk_uploads[upload_id]
@@ -982,6 +1181,12 @@ def upload_finalize():
         "abstrak":     data.get("abstrak", ""),
         "dasar_hukum": data.get("dasar_hukum", ""),
     }
+    title    = data.get("title", "")
+    doc_type = data.get("doc_type", "general")
+
+    # Mark job as processing and kick off background thread
+    _processing_jobs[upload_id] = {"status": "processing", "result": None, "error": None}
+    del _chunk_uploads[upload_id]
 
     class FileLike:
         def __init__(self, b, name):
@@ -990,20 +1195,44 @@ def upload_finalize():
         def read(self):
             return self._bytes
 
-    result, error = process_and_store_document(
-        FileLike(file_bytes, filename),
-        data.get("title", ""), data.get("doc_type", "general"),
-        scope="admin", metadata=metadata
-    )
-    del _chunk_uploads[upload_id]
+    def do_process():
+        result, error = process_and_store_document(
+            FileLike(file_bytes, filename), title, doc_type,
+            scope="admin", metadata=metadata
+        )
+        if error:
+            _processing_jobs[upload_id]["status"] = "error"
+            _processing_jobs[upload_id]["error"]  = error
+        else:
+            result["verified"]     = True
+            result["checksum"]     = actual_checksum
+            result["file_size_mb"] = round(len(file_bytes) / (1024 * 1024), 1)
+            _processing_jobs[upload_id]["status"] = "done"
+            _processing_jobs[upload_id]["result"] = result
 
-    if error:
-        return jsonify({"error": error}), 400
+    import threading
+    threading.Thread(target=do_process, daemon=True).start()
 
-    result["verified"]     = True
-    result["checksum"]     = actual_checksum
-    result["file_size_mb"] = round(len(file_bytes) / (1024 * 1024), 1)
-    return jsonify(result), 201
+    # Return immediately — client polls /api/admin/upload/status/<upload_id>
+    return jsonify({"status": "processing", "upload_id": upload_id}), 202
+
+
+@app.route("/api/admin/upload/status/<upload_id>", methods=["GET"])
+def upload_status(upload_id):
+    """Poll this endpoint to check background processing status."""
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    if upload_id not in _processing_jobs:
+        return jsonify({"error": "Unknown upload_id"}), 404
+    job = _processing_jobs[upload_id]
+    if job["status"] == "processing":
+        return jsonify({"status": "processing"})
+    if job["status"] == "error":
+        del _processing_jobs[upload_id]
+        return jsonify({"status": "error", "error": job["error"]}), 400
+    result = job["result"]
+    del _processing_jobs[upload_id]
+    return jsonify({"status": "done", "result": result}), 201
 
 
 @app.route("/api/admin/documents", methods=["GET"])
@@ -1014,9 +1243,127 @@ def list_admin_documents():
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("SELECT id, filename, title, doc_type, total_chunks, nomor_tahun, teu, subjek, status, uploaded_at FROM legal_documents WHERE scope = 'admin' ORDER BY uploaded_at DESC")
     docs = cur.fetchall()
+    result = []
+    for d in docs:
+        # Count embedded vs total chunks
+        cur.execute("SELECT COUNT(*) AS total, COUNT(embedding) AS embedded FROM document_chunks WHERE document_id = %s", (d["id"],))
+        counts = cur.fetchone()
+        result.append({
+            "id": d["id"], "filename": d["filename"], "title": d["title"],
+            "doc_type": d["doc_type"], "total_chunks": d["total_chunks"],
+            "nomor_tahun": d["nomor_tahun"] or "", "teu": d["teu"] or "",
+            "subjek": d["subjek"] or "", "status": d["status"] or "berlaku",
+            "uploaded_at": d["uploaded_at"].isoformat() if d["uploaded_at"] else None,
+            "embedded_chunks": counts["embedded"] if counts else 0,
+        })
     cur.close()
     conn.close()
-    return jsonify([{"id": d["id"], "filename": d["filename"], "title": d["title"], "doc_type": d["doc_type"], "total_chunks": d["total_chunks"], "nomor_tahun": d["nomor_tahun"] or "", "teu": d["teu"] or "", "subjek": d["subjek"] or "", "status": d["status"] or "berlaku", "uploaded_at": d["uploaded_at"].isoformat() if d["uploaded_at"] else None} for d in docs])
+    return jsonify(result)
+
+
+@app.route("/api/admin/list-models", methods=["GET"])
+def list_embedding_models():
+    """Diagnostic: list all models available via the API key."""
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        import urllib.request as _req
+        import json as _json
+        api_key = os.environ.get("GOOGLE_API_KEY", "")
+        url = "https://generativelanguage.googleapis.com/v1beta/models?key=" + api_key
+        with _req.urlopen(url, timeout=10) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        embedding_models = [
+            m["name"] for m in data.get("models", [])
+            if "embedContent" in m.get("supportedGenerationMethods", [])
+        ]
+        return jsonify({"embedding_models": embedding_models, "total": len(embedding_models)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# Track background embedding jobs: doc_id -> {status, embedded, errors, total}
+_embed_jobs = {}
+
+@app.route("/api/admin/embed/<int:doc_id>", methods=["POST"])
+def embed_document(doc_id):
+    """Kick off background embedding job and return immediately to avoid Railway timeout."""
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT id, title, total_chunks FROM legal_documents WHERE id = %s AND scope = 'admin'", (doc_id,))
+    doc = cur.fetchone()
+    if not doc:
+        cur.close(); conn.close()
+        return jsonify({"error": "Document not found"}), 404
+
+    cur.execute("SELECT COUNT(*) AS cnt FROM document_chunks WHERE document_id = %s AND embedding IS NULL", (doc_id,))
+    remaining = cur.fetchone()["cnt"]
+    cur.close(); conn.close()
+
+    if remaining == 0:
+        return jsonify({"message": "All chunks already embedded", "embedded": 0, "total": doc["total_chunks"]})
+
+    # If already running, return current status
+    if doc_id in _embed_jobs and _embed_jobs[doc_id]["status"] == "running":
+        return jsonify({"message": "Embedding already in progress", **_embed_jobs[doc_id]})
+
+    _embed_jobs[doc_id] = {"status": "running", "embedded": 0, "errors": 0, "total": remaining}
+
+    def run_embedding():
+        conn2 = get_db()
+        cur2  = conn2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cur2.execute("SELECT id, content FROM document_chunks WHERE document_id = %s AND embedding IS NULL ORDER BY chunk_index", (doc_id,))
+            chunks = cur2.fetchall()
+            batch_size = 100  # Gemini batchEmbedContents supports up to 100
+            for batch_start in range(0, len(chunks), batch_size):
+                batch = chunks[batch_start:batch_start + batch_size]
+                texts = [c["content"] for c in batch]
+                embeddings = generate_embeddings_batch(texts)
+                for chunk, emb in zip(batch, embeddings):
+                    if emb:
+                        cur2.execute("UPDATE document_chunks SET embedding = %s::vector WHERE id = %s", (str(emb), chunk["id"]))
+                        _embed_jobs[doc_id]["embedded"] += 1
+                    else:
+                        _embed_jobs[doc_id]["errors"] += 1
+                conn2.commit()  # Commit after each batch
+                time.sleep(0.5)  # Brief pause between batches to respect rate limits
+
+            conn2.commit()  # Final commit
+
+            # Create ivfflat index
+            try:
+                cur2.execute("CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)")
+                conn2.commit()
+            except Exception:
+                pass
+
+            _embed_jobs[doc_id]["status"] = "done"
+        except Exception as e:
+            conn2.rollback()
+            _embed_jobs[doc_id]["status"] = "error"
+            _embed_jobs[doc_id]["error_msg"] = str(e)
+            print(f"[EMBED JOB ERROR] {e}", flush=True)
+        finally:
+            cur2.close(); conn2.close()
+
+    threading.Thread(target=run_embedding, daemon=True).start()
+
+    return jsonify({"message": "Embedding started in background", "total": remaining, "status": "running"})
+
+
+@app.route("/api/admin/embed/status/<int:doc_id>", methods=["GET"])
+def embed_status(doc_id):
+    """Poll progress of a background embedding job."""
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
+    job = _embed_jobs.get(doc_id)
+    if not job:
+        return jsonify({"status": "not_started"})
+    return jsonify(job)
 
 
 @app.route("/api/admin/documents/preview", methods=["POST"])
