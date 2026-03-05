@@ -50,15 +50,117 @@ async function deleteDocument(id) {
   }
 }
 
+// ─── Chunked upload constants ────────────────────────────
+const CHUNK_SIZE = 3 * 1024 * 1024;  // 3MB per chunk
+
+async function sha256(buffer) {
+  const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(hashBuffer))
+    .map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function splitIntoChunks(buffer) {
+  const chunks = [];
+  let offset = 0;
+  while (offset < buffer.byteLength) {
+    chunks.push(buffer.slice(offset, offset + CHUNK_SIZE));
+    offset += CHUNK_SIZE;
+  }
+  return chunks;
+}
+
+function setProgress(pct, label) {
+  const bar  = document.getElementById("upload-progress-bar");
+  const fill = document.getElementById("upload-progress-fill");
+  const text = document.getElementById("upload-progress-text");
+  if (!bar) return;
+  bar.style.display = "block";
+  fill.style.width  = pct + "%";
+  text.textContent  = label;
+}
+
+function hideProgress() {
+  const bar = document.getElementById("upload-progress-bar");
+  if (bar) bar.style.display = "none";
+}
+
 async function previewFile(file) {
-  const fd = new FormData();
-  fd.append("file", file);
-  const res = await fetch("/api/admin/documents/preview", { method: "POST", body: fd });
-  if (!res.ok) {
-    alert("Failed to read file. Please check the file format.");
+  // Small files (<4MB): send directly to existing preview route — unchanged
+  if (file.size < 4 * 1024 * 1024) {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch("/api/admin/documents/preview", { method: "POST", body: fd });
+    if (!res.ok) {
+      alert("Failed to read file. Please check the file format.");
+      return null;
+    }
+    return await res.json();
+  }
+
+  // Large files: chunked upload
+  try {
+    setProgress(2, "Reading file...");
+    const buffer = await file.arrayBuffer();
+    const chunks = splitIntoChunks(buffer);
+    const total  = chunks.length;
+
+    setProgress(5, "Calculating checksum...");
+    const checksum = await sha256(buffer);
+
+    setProgress(8, "Initialising upload...");
+    const initRes = await fetch("/api/admin/upload/init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filename:     file.name,
+        file_size:    file.size,
+        total_chunks: total,
+        checksum:     checksum
+      })
+    });
+    if (!initRes.ok) throw new Error("Failed to initialise upload");
+    const { upload_id } = await initRes.json();
+
+    // Store on file object so uploadDocument can finalize
+    selectedFile._uploadId = upload_id;
+
+    // Send chunk 0 first (needed for metadata preview)
+    setProgress(12, `Uploading chunk 1 of ${total}...`);
+    const fd0 = new FormData();
+    fd0.append("upload_id",   upload_id);
+    fd0.append("chunk_index", "0");
+    fd0.append("chunk", new Blob([chunks[0]]), "chunk0");
+    const c0Res = await fetch("/api/admin/upload/chunk", { method: "POST", body: fd0 });
+    if (!c0Res.ok) throw new Error("Failed to upload first chunk");
+
+    // Get metadata from chunk 0
+    setProgress(18, "Reading document metadata...");
+    const pvFd = new FormData();
+    pvFd.append("upload_id", upload_id);
+    const pvRes = await fetch("/api/admin/upload/preview", { method: "POST", body: pvFd });
+    if (!pvRes.ok) throw new Error("Failed to read file metadata");
+    const metadata = await pvRes.json();
+
+    // Send remaining chunks
+    for (let i = 1; i < total; i++) {
+      const pct = Math.round(18 + (i / total) * 76);
+      setProgress(pct, `Uploading chunk ${i + 1} of ${total}...`);
+      const fd = new FormData();
+      fd.append("upload_id",   upload_id);
+      fd.append("chunk_index", String(i));
+      fd.append("chunk", new Blob([chunks[i]]), "chunk" + i);
+      const cRes = await fetch("/api/admin/upload/chunk", { method: "POST", body: fd });
+      if (!cRes.ok) throw new Error(`Failed to upload chunk ${i + 1}`);
+    }
+
+    setProgress(95, "All chunks received — ready to process");
+    return metadata;
+
+  } catch(e) {
+    hideProgress();
+    alert("Failed to read file: " + e.message);
     return null;
   }
-  return await res.json();
 }
 
 function showPreviewSection(metadata) {
@@ -89,40 +191,79 @@ function hidePreviewSection() {
 
 async function uploadDocument() {
   if (!selectedFile) return;
-  const btn = document.getElementById("admin-upload-btn");
+  const btn    = document.getElementById("admin-upload-btn");
   const status = document.getElementById("admin-upload-status");
-  btn.disabled = true;
-  btn.textContent = "Uploading...";
+  btn.disabled       = true;
   status.textContent = "";
 
-  const fd = new FormData();
-  fd.append("file", selectedFile);
-  fd.append("title", document.getElementById("admin-title").value);
-  fd.append("doc_type", document.getElementById("admin-doc-type").value);
-  fd.append("nomor_tahun", document.getElementById("admin-nomor-tahun").value);
-  fd.append("teu", document.getElementById("admin-teu").value);
-  fd.append("subjek", document.getElementById("admin-subjek").value);
-  fd.append("status", document.getElementById("admin-status").value);
-  fd.append("abstrak", document.getElementById("admin-abstrak").value);
-  fd.append("dasar_hukum", document.getElementById("admin-dasar-hukum").value);
+  try {
+    // ── Small file: original direct upload path ───────────
+    if (!selectedFile._uploadId) {
+      btn.textContent = "Processing document...";
+      const fd = new FormData();
+      fd.append("file",        selectedFile);
+      fd.append("title",       document.getElementById("admin-title").value);
+      fd.append("doc_type",    document.getElementById("admin-doc-type").value);
+      fd.append("nomor_tahun", document.getElementById("admin-nomor-tahun").value);
+      fd.append("teu",         document.getElementById("admin-teu").value);
+      fd.append("subjek",      document.getElementById("admin-subjek").value);
+      fd.append("status",      document.getElementById("admin-status").value);
+      fd.append("abstrak",     document.getElementById("admin-abstrak").value);
+      fd.append("dasar_hukum", document.getElementById("admin-dasar-hukum").value);
+      const res = await fetch("/api/admin/documents", { method: "POST", body: fd });
+      if (!res.ok) { const d = await res.json(); throw new Error(d.error || "Upload failed"); }
+      const result = await res.json();
+      showUploadSuccess(status, result);
+      return;
+    }
 
-  const res = await fetch("/api/admin/documents", { method: "POST", body: fd });
+    // ── Large file: finalize chunked upload ───────────────
+    setProgress(97, "Processing document — this may take a minute...");
+    btn.textContent = "Processing document...";
 
-  if (res.ok) {
-    status.textContent = "✓ Document uploaded successfully!";
-    status.className = "admin-upload-status success";
-    setTimeout(() => {
-      hidePreviewSection();
-      loadDocuments();
-    }, 1500);
-  } else {
-    const data = await res.json();
-    status.textContent = `✗ Upload failed: ${data.error || "Unknown error"}`;
-    status.className = "admin-upload-status error";
+    const finalRes = await fetch("/api/admin/upload/finalize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        upload_id:   selectedFile._uploadId,
+        title:       document.getElementById("admin-title").value,
+        doc_type:    document.getElementById("admin-doc-type").value,
+        nomor_tahun: document.getElementById("admin-nomor-tahun").value,
+        teu:         document.getElementById("admin-teu").value,
+        subjek:      document.getElementById("admin-subjek").value,
+        status:      document.getElementById("admin-status").value,
+        abstrak:     document.getElementById("admin-abstrak").value,
+        dasar_hukum: document.getElementById("admin-dasar-hukum").value
+      })
+    });
+
+    if (!finalRes.ok) {
+      const d = await finalRes.json();
+      throw new Error(d.error || "Finalization failed");
+    }
+    const result = await finalRes.json();
+    setProgress(100, "Complete");
+    showUploadSuccess(status, result);
+
+  } catch(e) {
+    hideProgress();
+    status.textContent = `✗ Upload failed: ${e.message}`;
+    status.className   = "admin-upload-status error";
+    btn.disabled       = false;
+    btn.innerHTML      = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg> Upload Document`;
   }
+}
 
-  btn.disabled = false;
+function showUploadSuccess(status, result) {
+  hideProgress();
+  const mb    = result.file_size_mb ? ` · ${result.file_size_mb} MB` : "";
+  const check = result.verified     ? " · ✓ checksum verified"       : "";
+  status.textContent = `✓ Uploaded: ${result.total_chunks} chunks created${mb}${check}`;
+  status.className   = "admin-upload-status success";
+  const btn = document.getElementById("admin-upload-btn");
+  btn.disabled  = false;
   btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg> Upload Document`;
+  setTimeout(() => { hidePreviewSection(); loadDocuments(); }, 2500);
 }
 
 function escapeHtml(text) {
