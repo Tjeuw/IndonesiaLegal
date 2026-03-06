@@ -115,13 +115,47 @@
           <div class="admin-form-group">
             <label>Document Type</label>
             <select id="admin-doc-type" class="admin-input">
-              <option value="uu">UU (Undang-Undang)</option>
-              <option value="pp">PP (Peraturan Pemerintah)</option>
-              <option value="perpres">Perpres (Peraturan Presiden)</option>
-              <option value="permen">Permen (Peraturan Menteri)</option>
-              <option value="kepres">Kepres (Keputusan Presiden)</option>
-              <option value="perda">Perda (Peraturan Daerah)</option>
-              <option value="general" selected>General</option>
+              <optgroup label="Primary Legislation">
+                <option value="uu">UU – Undang-Undang [Level 3]</option>
+                <option value="perppu">Perppu – Peraturan Pemerintah Pengganti UU [Level 3]</option>
+              </optgroup>
+              <optgroup label="Government &amp; Presidential">
+                <option value="pp">PP – Peraturan Pemerintah [Level 4]</option>
+                <option value="perpres">Perpres – Peraturan Presiden [Level 5]</option>
+                <option value="kepres">Kepres – Keputusan Presiden [Level 5]</option>
+                <option value="inpres">Inpres – Instruksi Presiden [Level 5]</option>
+              </optgroup>
+              <optgroup label="Ministerial">
+                <option value="permen">Permen – Peraturan Menteri [Level 6]</option>
+                <option value="kepmen">Kepmen – Keputusan Menteri [Level 6]</option>
+                <option value="peraturan_badan">Peraturan Badan/Lembaga/Komisi [Level 6]</option>
+              </optgroup>
+              <optgroup label="Financial Regulators [Level 4.5]">
+                <option value="pojk">POJK – Peraturan OJK</option>
+                <option value="seojk">SEOJK – Surat Edaran OJK</option>
+                <option value="pbi">PBI – Peraturan Bank Indonesia</option>
+                <option value="padg">PADG – Peraturan Anggota Dewan Gubernur BI</option>
+                <option value="perka_bkpm">Perka BKPM/BPKM – Investment Board</option>
+                <option value="peraturan_bappebti">Peraturan Bappebti – Crypto/Commodity</option>
+              </optgroup>
+              <optgroup label="Court Decisions">
+                <option value="putusan_mk">Putusan MK – Mahkamah Konstitusi</option>
+                <option value="putusan_ma">Putusan MA – Mahkamah Agung</option>
+                <option value="putusan_pengadilan">Putusan Pengadilan – Lower Court</option>
+              </optgroup>
+              <optgroup label="Circulars &amp; SE [Level 6.5]">
+                <option value="sema">SEMA – Surat Edaran Mahkamah Agung</option>
+                <option value="surat_edaran">Surat Edaran – Ministry/Agency Circular</option>
+              </optgroup>
+              <optgroup label="Regional">
+                <option value="perda">Perda – Peraturan Daerah [Level 7]</option>
+                <option value="pergub">Pergub – Peraturan Gubernur [Level 7]</option>
+                <option value="perbup_perwal">Perbup/Perwal – Bupati/Walikota [Level 8]</option>
+                <option value="peraturan_desa">Peraturan Desa [Level 9]</option>
+              </optgroup>
+              <optgroup label="Other">
+                <option value="general" selected>General / Other</option>
+              </optgroup>
             </select>
           </div>
           <div class="admin-form-group">

@@ -37,106 +37,134 @@ _chunk_uploads = {}
 _processing_jobs = {}  # upload_id -> {"status", "result", "error"}
 
 SYSTEM_PROMPT = """Name: Indonesia Law AI
-Goal: A RAG-based (Retrieval-Augmented Generation) system for querying Indonesian laws, regulations, and court decisions. An expert Indonesian legal research assistant specializing in corporate, investment, and business law. You reason carefully about Indonesian law using the frameworks below before answering any question.
-Target User: English-speaking and Mandarin-speaking investors, PT PMA (foreign-invested) companies, and business owners currently operating or seeking to operate in Indonesia. These users need practical, high-accuracy legal guidance on regulations, corporate structuring, licensing, contracts, and compliance in Indonesia.
+Goal: A RAG-based legal research assistant for Indonesian corporate, investment, and business law. You do not give a single answer — you map the legal landscape, identify tensions and competing valid positions, and help the user anticipate how a counterparty, regulator, or court might read the same law differently.
+Target User: English-speaking and Mandarin-speaking investors, PT PMA companies, and business owners operating in Indonesia.
 
 LANGUAGE RULES:
-- If the user writes in English, respond entirely in English.
-- If the user writes in Mandarin (Chinese), respond entirely in Mandarin (Chinese).
-- If the user writes in Bahasa Indonesia, respond entirely in Bahasa Indonesia.
-- Always keep Indonesian legal terms (UU, PP, Perpres, Pasal, Ayat, etc.) in their original Indonesian form, but provide English or Mandarin translations in parentheses on first use.
-- Prioritize clarity for non-Indonesian audiences.
+- Match the user's language exactly: English → English, Mandarin → Mandarin, Bahasa Indonesia → Bahasa Indonesia.
+- Keep Indonesian legal terms in original form (UU, PP, Pasal, Ayat, etc.) with translation in parentheses on first use.
 
 PART 2: LEGAL HIERARCHY (Tata Urutan Peraturan Perundang-undangan)
-
 Governed by UU No. 12 Tahun 2011 as amended by UU No. 15 Tahun 2019 and UU No. 13 Tahun 2022.
+Each source in DOCUMENT REFERENCE DATA carries a [Level N] tag. Use these levels to apply Lex Superior mechanically.
 
-Hierarchy from highest to lowest:
-1. UUD 1945 — The Constitution.
-2. TAP MPR — Decrees of the People's Consultative Assembly.
-3. UU (Undang-Undang) / PERPPU — Laws passed by DPR or emergency presidential laws.
-4. PP (Peraturan Pemerintah) — Government Regulations.
-5. PERPRES (Peraturan Presiden) — Presidential Regulations.
-6. PERDA PROVINSI — Provincial Regional Regulations.
-7. PERDA KABUPATEN/KOTA — District/City Regional Regulations.
+Hierarchy levels:
+Level 1 — UUD 1945: Constitution. Cannot be overridden by any law.
+Level 2 — TAP MPR: MPR Decrees. Rare but binding on all state institutions.
+Level 3 — UU / PERPPU: Laws (DPR) or Emergency Presidential Laws. PERPPU requires DPR ratification.
+Level 4 — PP: Government Regulations. Implement UU; cannot add new obligations beyond the UU.
+Level 4.5 — POJK / PBI / PADG / Perka BKPM: Agency regulations with delegated authority. Govern specific sectors (finance, investment). A POJK overrides a Perda on banking matters; a local Perda cannot change OJK minimum capital rules.
+Level 5 — PERPRES / KEPRES / INPRES: Presidential instruments. Fast to issue, frequently amended.
+Level 6 — PERMEN / KEPMEN / Peraturan Badan: Ministerial regulations and decrees. High volume; frequent inter-ministry conflicts.
+Level 6.5 — SEMA / Surat Edaran: Circulars. NOT legislation but routinely enforced as binding by implementing officials, judges, and regulators.
+Level 7 — PERDA PROVINSI / PERGUB: Provincial regulations. Formally subordinate to central law but often the primary enforcement reality for land, labour, and environment.
+Level 8 — PERDA KAB/KOTA / PERBUP / PERWAL: District/City regulations. Lowest formal rank; highest day-to-day enforcement in licensing, zoning, local taxes, building permits.
+Level 9 — PERATURAN DESA: Village regulations. Relevant for rural investment, agriculture, mining community relations.
+Court decisions (not in hierarchy but modify it):
+— Putusan MK: FINAL and ERGA OMNES. Immediately invalidates or modifies UU provisions. Overrides any Level 3 text it has struck down.
+— Putusan MA (Hak Uji Materiil): Can annul PP, Perpres, Permen (Levels 4–6). Annulled regulations may still appear in official text.
+— SEMA: Supreme Court circulars. Followed by all judges as practical guidance even without formal binding force.
 
-MINISTERIAL & AGENCY REGULATIONS (between Perpres and Perda):
-- PERMEN, OJK Regulations (POJK), BI Regulations (PBI, PADG), BKPM/BPKM Regulations, Circulars (Surat Edaran).
-
-CONFLICT RULES:
-- Lex Superior Derogat Legi Inferiori: Higher law overrides lower law.
-- Lex Specialis Derogat Legi Generali: Specific law overrides general law at same level.
-- Lex Posterior Derogat Legi Priori: Newer law overrides older law at same level.
+DOCUMENT TYPE REFERENCE:
+- UU: Primary legislation. Binding, requires DPR + President.
+- PERPPU: Emergency law. Equal force to UU; temporary until DPR ratifies or rejects.
+- PP: Implements UU. Cannot exceed UU scope.
+- PERPRES: Presidential policy. Fast-track instrument, frequently amended.
+- KEPRES/KEPPRES: Presidential Decree. Often specific/one-time; some still operative decades later (ZOMBIE KEPRES risk).
+- INPRES: Presidential Instruction. Directs government agencies; not directly enforceable by private parties.
+- PERMEN: Ministerial regulation. High volume; conflicts between ministries are common.
+- KEPMEN: Ministerial Decree. Applies to specific entities or one-time decisions (beschikking character).
+- POJK: OJK regulation. Governs all financial services; treated as Level 4.5.
+- PBI: Bank Indonesia regulation. Governs payment systems, monetary policy, forex.
+- PADG: BI Governor Board Member regulation. Highly technical; implements PBI.
+- SEOJK: OJK Circular. Technical "how-to" for POJK compliance (e.g. specific encryption standards).
+- Perka BKPM: Investment Board regulation. Governs PT PMA thresholds, OSS-RBA procedures.
+- Peraturan Bappebti: Governs crypto assets and commodity futures.
+- PERDA: Regional regulation. Formally subordinate; practically dominant in licensing, zoning, local taxes.
+- PERGUB: Governor regulation. Implements Perda at provincial level.
+- PERBUP/PERWAL: Regent/Mayor regulation. Highly variable; critical for operational permits.
+- PERATURAN DESA: Village regulation. Relevant for rural land use and community relations.
+- Putusan MK: Constitutional Court ruling. Final, erga omnes.
+- Putusan MA: Supreme Court ruling. Binding precedent; can annul subordinate regulations.
+- Putusan Pengadilan: Lower court decisions. Persuasive but not binding on other courts.
+- SEMA: Supreme Court Circular. Followed by all judges in practice.
+- Surat Edaran: Agency/Ministry Circular. Not law; routinely enforced as policy.
+- Keputusan (general): Beschikking — applies to a specific entity, not a general rule. Lower RAG value for general compliance; higher value for precedent analysis.
+- Peraturan (general): Regeling — general rule applying to all in a category. High RAG value.
 
 PART 3: THREE PARALLEL LEGAL SYSTEMS
+System 1 — National (Civil Law): Default for all entities. Corporations, investment, tax, contracts, IP, criminal law.
+System 2 — Adat (Customary Law): Recognized under UUD 1945. Relevant for communal land rights, inheritance, traditional governance. Varies by region. Can override formal land titles in practice. Special autonomy: Aceh uses Qanun (including Sharia-based business codes) instead of Perda.
+System 3 — Religious (Islamic) Law: Applies to Muslims in personal matters. Marriage, inheritance, child custody, waqf. Enforced by Pengadilan Agama.
 
-SYSTEM 1 — NATIONAL (Civil Law): Default for all entities. Applies to corporations, investment, tax, contracts, IP, criminal law.
-SYSTEM 2 — ADAT (Customary Law): Recognized under UUD 1945. Relevant for communal land rights, inheritance, traditional governance.
-SYSTEM 3 — RELIGIOUS (Islamic) Law: Applies to Muslims. Covers marriage, inheritance, child custody, waqf.
+PART 4: THREE CONFLICT RULES — APPLY ALL THREE, FLAG EACH TENSION
+1. Lex Superior Derogat Legi Inferiori: Higher level wins. Use [Level N] tags from sources. BUT: implementing agencies often enforce their own regulation regardless of hierarchy.
+2. Lex Specialis Derogat Legi Generali: Specific law wins over general at same level. TENSION: two laws can each claim to be the "specific" one for the same activity.
+3. Lex Posterior Derogat Legi Priori: Newer law wins over older at same level. EXCEPTION: older pasal may survive if the newer law did not expressly repeal it.
 
-PART 4: COURT SYSTEM
-- General Courts: Pengadilan Negeri -> Pengadilan Tinggi -> Mahkamah Agung
-- Religious Courts: Pengadilan Agama -> Pengadilan Tinggi Agama -> Mahkamah Agung
-- Administrative Courts (PTUN): Government administrative disputes
-- Commercial Courts: Bankruptcy, PKPU, IP, competition
-- Constitutional Court (MK): Reviews UU constitutionality. Decisions FINAL and ERGA OMNES.
-- Tax Court: Tax disputes
-- Arbitration: BANI (domestic), SIAC/ICC (international). New York Convention applies.
+PART 5: SEVEN ARBITRAGE PATTERNS — CHECK ALL FOR EVERY ANSWER
+A. ZOMBIE PASAL: A pasal in an old UU, PP, or KEPRES never expressly repealed by a newer law. Technically still valid. Courts may apply it. Counterparties may invoke it. Flag when this risk exists.
+B. UU CIPTA KERJA GAP: UU No. 11 Tahun 2020 / UU No. 6 Tahun 2023 amended 79 laws via omnibus method. Many implementing PPs not yet issued. Gap between UU text and implementing regulation means old PP may still govern in practice. Documents tagged [Omnibus Affected] carry this risk.
+C. PUTUSAN MK MODIFICATION: MK has modified or invalidated UU provisions (labour law, investment law, others). A UU pasal may still appear in text but be unenforceable. Always flag when a relevant MK decision may exist — especially for labour, land, and investment provisions.
+D. PUTUSAN MA ANNULMENT: MA can annul PP, Perpres, and Permen via Hak Uji Materiil. A regulation in force may have been annulled and not yet updated in official text.
+E. PERDA ENFORCEMENT REALITY: Central law formally prevails, but local government (natural resources, construction, retail, hospitality) may refuse permits based on Perda or informal Kepala Dinas policy. Jakarta Keputusan Gubernur often acts with weight of regulation due to its special administrative status. Flag when local enforcement is likely to diverge.
+F. MINISTRY CONFLICT: Two PERMEN from different ministries covering the same activity are both formally valid. The enforcing ministry depends on which agency holds the licensing authority for that specific business activity. Flag which ministry is likely to be the enforcement gatekeeper.
+G. SURAT EDARAN ENFORCEMENT: SE and circulars are not legislation but treated as binding instructions by implementing officials. A bank, OJK examiner, or local office may enforce an SE even if it appears to conflict with the underlying UU or PP.
 
-PART 5: CORPORATE & INVESTMENT LAW
+PART 6: ANSWER FRAMEWORK — USE THIS STRUCTURE FOR EVERY RESPONSE
 
-COMPANY TYPES:
-- PT (Perseroan Terbatas): UU No. 40 Tahun 2007 as amended by UU Cipta Kerja.
-- PT PMA: Foreign-invested PT. UU No. 25 Tahun 2007 and BKPM regulations.
-- PT PMDN: Domestically-invested PT.
-- Koperasi: UU No. 25 Tahun 1992.
-- Yayasan: UU No. 16 Tahun 2001.
+Step 1 — LEGAL LANDSCAPE:
+List all potentially relevant laws, regulations, and document types in hierarchy order. Note jurisdiction (National / Province / Sector-specific).
 
-FOREIGN INVESTMENT:
-- Perpres No. 10 Tahun 2021 (Prioritas Investasi) under UU Cipta Kerja replaced the Negative Investment List.
-- OSS (Online Single Submission) via oss.go.id is the primary licensing gateway.
-- NIB (Nomor Induk Berusaha) is mandatory.
+Step 2 — PRIMARY ANSWER:
+What does the highest applicable law say? Cite pasal and ayat exactly. Note the [Level] of the source.
 
-UU CIPTA KERJA: UU No. 11 Tahun 2020, revised as UU No. 6 Tahun 2023. Omnibus law amending 79 existing laws.
+Step 3 — TENSIONS AND COMPETING POSITIONS:
+Apply all 7 arbitrage patterns. For each tension found:
+• What is the tension
+• Position A (e.g. central law / formal hierarchy reading)
+• Position B (e.g. local enforcement / older pasal / SE reading)
+• Which position is more likely to prevail in practice, and why
 
-PART 6: ANSWERING RULES
+Step 4 — COUNTERPARTY ANALYSIS:
+How might a counterparty, opposing counsel, regulator, or local official read this differently? Which pasal or regulation would they invoke?
+
+Step 5 — LEGAL CERTAINTY RATING:
+HIGH — clear law, consistent national enforcement
+MEDIUM — ambiguity or conflicting sources exist
+LOW — genuinely contested; enforcement unpredictable or regionally variable
+
+Step 6 — SOURCES:
+List every cited document: full title, nomor tahun, specific pasal/ayat, [Level N], jurisdiction, current status (berlaku/diubah/dicabut), and note if any MK or MA ruling may affect it.
 
 ALWAYS:
-1. Identify which legal system(s) apply (national / adat / religious).
-2. Cite the highest relevant law first, then implementing regulations.
-3. Cite specific regulation numbers, pasal, and ayat. E.g.: "UU No. 40 Tahun 2007 Pasal 32 Ayat 1".
-4. Flag if a regulation has likely been amended by UU Cipta Kerja.
-5. Flag conflicts between laws and explain which prevails.
-6. Note when adat or religious law may be relevant.
-7. Recommend professional legal counsel for complex matters.
-8. Answer in the same language as the question.
-
-WHEN LEGAL DOCUMENT REFERENCES ARE PROVIDED:
-- Treat excerpts as PRIMARY sources — cite them directly and accurately.
-- Every legal claim MUST have an inline citation: (UU No. 40 Tahun 2007, Pasal 32 Ayat 1)
-- If the source chunk includes a pasal_ref label, use that exact reference.
-- For court decisions: cite page number and paragraph if available.
-- If excerpts don't fully answer the question, supplement with general knowledge, clearly marking it: [General knowledge — verify against primary source]
-- At the END of every answer using document references, include a ## Sources section listing each cited document with full title, nomor tahun, specific pasal/ayat cited, and status.
+- Cite specific regulation numbers, pasal, and ayat.
+- Use the [Level N] tag from retrieved sources when applying Lex Superior.
+- Flag if a provision may have been modified by UU Cipta Kerja but implementing PP not yet issued.
+- Flag if an MK ruling may have modified or invalidated a UU provision.
+- Mark any statement not from retrieved documents as: [General knowledge — verify against primary source]
+- End with: "Verify with a licensed Indonesian attorney (Advokat) before taking legal action."
 
 NEVER:
+- Give only one answer when genuine legal ambiguity exists.
 - Invent regulation numbers or pasal references.
-- Give a definitive answer requiring a licensed attorney's review.
-- Ignore the three-system framework.
-- Omit the Sources section when document references are provided.
+- Skip the counterparty analysis step.
+- Omit the Sources section.
 
 FORMAT:
-- Use ## for main section headers
-- Use numbered lists for requirements, steps, or ranked items
-- Use - bullet points for supporting details
-- Bold (**text**) for regulation names and key terms
-- Always end with ## Sources (when documents cited), then: "Verify with a licensed Indonesian attorney (Advokat) before taking legal action."
+- ## for main section headers
+- Numbered lists for steps or requirements
+- Bullet points for supporting details
+- **Bold** for regulation names and key legal terms
+- Always end with ## Sources, then the attorney disclaimer.
 
 SECURITY: Maximum query length 500 characters."""
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
-MAX_SEARCH_RESULTS = 5
+MAX_SEARCH_RESULTS  = 5   # chunks per document returned to AI
+MAX_SEARCH_DOCS     = 3   # max distinct documents to retrieve from
+MAX_SEARCH_POOL     = 25  # candidate pool fetched from DB before grouping
 
 
 def generate_embeddings_batch(texts):
@@ -288,6 +316,19 @@ def init_db():
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON document_chunks USING GIN(tsv)")
+    # New columns for hierarchy reasoning — added via ALTER to preserve existing data
+    cur.execute("""
+        ALTER TABLE legal_documents
+        ADD COLUMN IF NOT EXISTS hierarchy_level  INTEGER DEFAULT NULL,
+        ADD COLUMN IF NOT EXISTS effective_date   DATE DEFAULT NULL,
+        ADD COLUMN IF NOT EXISTS is_omnibus_affected BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS sector           TEXT DEFAULT '',
+        ADD COLUMN IF NOT EXISTS jurisdiction     TEXT DEFAULT 'National'
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_legal_logic
+        ON legal_documents (hierarchy_level, effective_date, sector)
+    """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON document_chunks(document_id)")
     try:
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -490,20 +531,94 @@ def extract_text_from_pdf(file_bytes):
     return fix_spaced_text(text)
 
 
+# Hierarchy level mapping per doc_type
+DOC_TYPE_HIERARCHY = {
+    "uud":              1,
+    "tap_mpr":          2,
+    "uu":               3,
+    "perppu":           3,
+    "pp":               4,
+    "pojk":             4.5,
+    "pbi":              4.5,
+    "padg":             4.5,
+    "seojk":            4.5,
+    "perka_bkpm":       4.5,
+    "peraturan_bappebti": 4.5,
+    "perpres":          5,
+    "kepres":           5,
+    "inpres":           5,
+    "permen":           6,
+    "kepmen":           6,
+    "peraturan_badan":  6,
+    "sema":             6.5,
+    "surat_edaran":     6.5,
+    "perda":            7,
+    "pergub":           7,
+    "perbup_perwal":    8,
+    "peraturan_desa":   9,
+    "putusan_mk":       None,   # modifies hierarchy, not in it
+    "putusan_ma":       None,
+    "putusan_pengadilan": None,
+    "general":          None,
+}
+
+# Sector keyword mapping
+SECTOR_KEYWORDS = {
+    "Banking":      ["PERBANKAN", "BANK INDONESIA", "OJK", "OTORITAS JASA KEUANGAN", "KREDIT", "DANA PIHAK KETIGA"],
+    "Investment":   ["PENANAMAN MODAL", "INVESTASI", "BKPM", "PMA", "PMDN", "DNI", "OSS", "NIB"],
+    "Corporate":    ["PERSEROAN TERBATAS", "PT ", "KOPERASI", "YAYASAN", "DIREKSI", "KOMISARIS", "RUPS"],
+    "Labour":       ["KETENAGAKERJAAN", "TENAGA KERJA", "UMR", "UMP", "UMK", "PHK", "PESANGON", "BURUH"],
+    "Tax":          ["PERPAJAKAN", "PAJAK", "DJP", "PPH", "PPN", "BEA CUKAI"],
+    "Land":         ["PERTANAHAN", "AGRARIA", "HGU", "HGB", "SHM", "TATA RUANG", "RDTR"],
+    "Environment":  ["LINGKUNGAN HIDUP", "AMDAL", "UKL", "UPL", "KEHUTANAN", "PERTAMBANGAN"],
+    "Trade":        ["PERDAGANGAN", "EKSPOR", "IMPOR", "DISTRIBUSI", "RITEL"],
+    "Finance":      ["KEUANGAN", "MODAL", "SAHAM", "EFEK", "BURSA", "ASURANSI", "FINTECH"],
+    "Mining":       ["PERTAMBANGAN", "MINERBA", "IUP", "IUPK", "BATUBARA"],
+    "Construction": ["KONSTRUKSI", "JASA KONSTRUKSI", "IMB", "PBG", "SLF", "BANGUNAN"],
+    "Crypto":       ["KRIPTO", "ASET DIGITAL", "BAPPEBTI", "BLOCKCHAIN", "EXCHANGE"],
+}
+
 def extract_metadata_from_text(text, filename=""):
     metadata = {
         "title": "", "doc_type": "general", "nomor_tahun": "",
         "teu": "", "subjek": "", "status": "berlaku",
-        "abstrak": "", "dasar_hukum": ""
+        "abstrak": "", "dasar_hukum": "",
+        "hierarchy_level": None, "effective_date": None,
+        "is_omnibus_affected": False, "sector": "", "jurisdiction": "National"
     }
     upper_text = text[:5000].upper()
     type_patterns = [
+        # Primary legislation
         (r'UNDANG[- ]?UNDANG\s+(?:REPUBLIK\s+INDONESIA\s+)?(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'uu'),
+        (r'PERATURAN\s+PEMERINTAH\s+PENGGANTI\s+UNDANG[- ]?UNDANG\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'perppu'),
+        # Government & presidential
         (r'PERATURAN\s+PEMERINTAH\s+(?:REPUBLIK\s+INDONESIA\s+)?(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'pp'),
         (r'PERATURAN\s+PRESIDEN\s+(?:REPUBLIK\s+INDONESIA\s+)?(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'perpres'),
-        (r'PERATURAN\s+MENTERI\s+\w+\s+(?:REPUBLIK\s+INDONESIA\s+)?(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'permen'),
         (r'KEPUTUSAN\s+PRESIDEN\s+(?:REPUBLIK\s+INDONESIA\s+)?(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'kepres'),
+        (r'INSTRUKSI\s+PRESIDEN\s+(?:REPUBLIK\s+INDONESIA\s+)?(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'inpres'),
+        # Ministerial
+        (r'PERATURAN\s+MENTERI\s+\w+(?:\s+\w+)*\s+(?:REPUBLIK\s+INDONESIA\s+)?(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'permen'),
+        (r'KEPUTUSAN\s+MENTERI\s+\w+(?:\s+\w+)*\s+(?:REPUBLIK\s+INDONESIA\s+)?(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'kepmen'),
+        (r'PERATURAN\s+(?:BADAN|LEMBAGA|KOMISI|OTORITAS)\s+\w+(?:\s+\w+)*\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'peraturan_badan'),
+        # OJK & BI
+        (r'PERATURAN\s+OTORITAS\s+JASA\s+KEUANGAN\s+(?:NOMOR|NO\.?)\s*\.?\s*([\d/\.POJK]+)\s+TAHUN\s+(\d{4})', 'pojk'),
+        (r'SURAT\s+EDARAN\s+OTORITAS\s+JASA\s+KEUANGAN\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'seojk'),
+        (r'PERATURAN\s+BANK\s+INDONESIA\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'pbi'),
+        (r'PERATURAN\s+ANGGOTA\s+DEWAN\s+GUBERNUR\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'padg'),
+        (r'PERATURAN\s+(?:KEPALA\s+)?(?:BKPM|BPKM)\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'perka_bkpm'),
+        (r'PERATURAN\s+BAPPEBTI\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'peraturan_bappebti'),
+        # Court decisions
+        (r'PUTUSAN\s+MAHKAMAH\s+KONSTITUSI\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)[/\\](\d{4})', 'putusan_mk'),
+        (r'PUTUSAN\s+MAHKAMAH\s+AGUNG\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)[/\\](\d{4})', 'putusan_ma'),
+        (r'PUTUSAN\s+PENGADILAN\s+(?:NEGERI|TINGGI|NIAGA|TATA\s+USAHA\s+NEGARA)\s+\w+\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)[/\\](\d{4})', 'putusan_pengadilan'),
+        # Circulars
+        (r'SURAT\s+EDARAN\s+(?:MAHKAMAH\s+AGUNG|MA)\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'sema'),
+        (r'SURAT\s+EDARAN\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'surat_edaran'),
+        # Regional
         (r'PERATURAN\s+DAERAH\s+(?:PROVINSI|KABUPATEN|KOTA)\s+\w+\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'perda'),
+        (r'PERATURAN\s+GUBERNUR\s+\w+\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'pergub'),
+        (r'PERATURAN\s+(?:BUPATI|WALIKOTA)\s+\w+\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'perbup_perwal'),
+        (r'PERATURAN\s+DESA\s+\w+\s+(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', 'peraturan_desa'),
     ]
     for pattern, dtype in type_patterns:
         m = re.search(pattern, upper_text)
@@ -515,6 +630,41 @@ def extract_metadata_from_text(text, filename=""):
         gm = re.search(r'(?:NOMOR|NO\.?)\s*\.?\s*(\d+)\s+TAHUN\s+(\d{4})', upper_text)
         if gm:
             metadata["nomor_tahun"] = f"Nomor {gm.group(1)} Tahun {gm.group(2)}"
+
+    # Auto-populate hierarchy_level from doc_type
+    metadata["hierarchy_level"] = DOC_TYPE_HIERARCHY.get(metadata["doc_type"])
+
+    # Auto-populate effective_date from nomor_tahun year
+    if metadata["nomor_tahun"]:
+        yr = re.search(r'Tahun (\d{4})', metadata["nomor_tahun"])
+        if yr:
+            try:
+                metadata["effective_date"] = f"{yr.group(1)}-01-01"
+            except Exception:
+                pass
+
+    # Auto-detect if omnibus-affected (UU Cipta Kerja)
+    if re.search(r'CIPTA\s+KERJA|OMNIBUS|UU\s+NO\.?\s*11\s+TAHUN\s+2020|UU\s+NO\.?\s*6\s+TAHUN\s+2023', upper_text):
+        metadata["is_omnibus_affected"] = True
+
+    # Auto-detect sector from keywords
+    sectors_found = []
+    for sector_name, keywords in SECTOR_KEYWORDS.items():
+        if any(kw in upper_text[:3000] for kw in keywords):
+            sectors_found.append(sector_name)
+    if sectors_found:
+        metadata["sector"] = "; ".join(sectors_found[:3])
+
+    # Auto-detect jurisdiction — flag regional docs
+    region_match = re.search(
+        r'(?:PROVINSI|KABUPATEN|KOTA|GUBERNUR|BUPATI|WALIKOTA)\s+([A-Z][A-Z\s]+?)(?:\s+NOMOR|\s+TENTANG|\n)',
+        upper_text
+    )
+    if region_match:
+        region = region_match.group(1).strip().title()
+        metadata["jurisdiction"] = region
+    elif metadata["doc_type"] in ("perda", "pergub", "perbup_perwal", "peraturan_desa"):
+        metadata["jurisdiction"] = "Regional"
     tm = re.search(r'TENTANG\s+(.+?)(?:\n\n|\n[A-Z]{2,}|\nDENGAN|\nMENIMBANG|\nMEMUTUSKAN|\nBAB\s)', upper_text, re.DOTALL)
     if tm:
         t = re.sub(r'\s+', ' ', tm.group(1).strip())
@@ -624,14 +774,19 @@ def process_and_store_document(file, title, doc_type, scope="admin", conversatio
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
         """INSERT INTO legal_documents (filename, title, doc_type, scope, conversation_id, total_chunks,
-               nomor_tahun, teu, subjek, status, abstrak, dasar_hukum)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               nomor_tahun, teu, subjek, status, abstrak, dasar_hukum,
+               hierarchy_level, effective_date, is_omnibus_affected, sector, jurisdiction)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
            RETURNING id, filename, title, doc_type, scope, total_chunks,
-               nomor_tahun, teu, subjek, status, abstrak, dasar_hukum, uploaded_at""",
+               nomor_tahun, teu, subjek, status, abstrak, dasar_hukum,
+               hierarchy_level, effective_date, is_omnibus_affected, sector, jurisdiction, uploaded_at""",
         (filename, title or filename, doc_type, scope, conversation_id, len(chunk_dicts),
          metadata.get("nomor_tahun", ""), metadata.get("teu", ""),
          metadata.get("subjek", ""), metadata.get("status", "berlaku"),
-         abstrak_text, metadata.get("dasar_hukum", ""))
+         abstrak_text, metadata.get("dasar_hukum", ""),
+         metadata.get("hierarchy_level"), metadata.get("effective_date"),
+         metadata.get("is_omnibus_affected", False),
+         metadata.get("sector", ""), metadata.get("jurisdiction", "National"))
     )
     doc = cur.fetchone()
     # Batch insert all chunks — much faster than one-by-one for large documents
@@ -664,90 +819,134 @@ def process_and_store_document(file, title, doc_type, scope="admin", conversatio
 
 
 
+def _group_by_document(rows, max_docs=MAX_SEARCH_DOCS, max_chunks_per_doc=MAX_SEARCH_RESULTS):
+    """
+    From a flat list of ranked chunks, return the best chunks grouped by document.
+    Strategy:
+      1. Group all chunks by document title+nomor_tahun.
+      2. For each document, keep the top max_chunks_per_doc chunks (already ordered by rank).
+      3. Rank documents by their best (highest) chunk score.
+      4. Return chunks from the top max_docs documents.
+    Ensures cross-law retrieval: PT PMA query surfaces UU Penanaman Modal +
+    UU Perseroan Terbatas + UU Cipta Kerja simultaneously.
+    """
+    from collections import defaultdict
+    doc_chunks = defaultdict(list)
+    for row in rows:
+        doc_key = (row['doc_title'], row.get('nomor_tahun', ''))
+        doc_chunks[doc_key].append(row)
+
+    # Best score per document (first chunk is best — rows ordered by rank desc)
+    doc_best_score = {k: v[0]['rank'] for k, v in doc_chunks.items()}
+
+    # Sort documents by best score, take top max_docs
+    top_docs = sorted(doc_best_score, key=lambda k: doc_best_score[k], reverse=True)[:max_docs]
+
+    result = []
+    for doc_key in top_docs:
+        result.extend(doc_chunks[doc_key][:max_chunks_per_doc])
+    return result
+
+
 def search_documents(query, conversation_id=None, limit=MAX_SEARCH_RESULTS):
-    """Hybrid search: vector similarity first, keyword fallback if no embeddings."""
+    """
+    Multi-document hybrid search.
+    Phase 1: fetch MAX_SEARCH_POOL candidates from DB (vector or keyword).
+    Phase 2: group by document, pick top MAX_SEARCH_DOCS by best chunk score.
+    Phase 3: return up to MAX_SEARCH_RESULTS chunks per document.
+    Prevents a single large document dominating results.
+    """
     embedding = generate_embedding(query)
     conn = get_db()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    if embedding:
-        try:
-            vec_str = str(embedding)
-            if conversation_id:
-                cur.execute("""
+
+    SELECT_FIELDS = """
                     SELECT dc.content, dc.chunk_index,
                            COALESCE(dc.pasal_ref,'') AS pasal_ref,
                            COALESCE(dc.section_header,'') AS section_header,
                            dc.page_number,
+                           ld.id AS doc_id,
                            ld.title AS doc_title, ld.filename, ld.scope,
                            ld.nomor_tahun, ld.status AS doc_status, ld.doc_type,
-                           (1 - (dc.embedding <=> %s::vector))
+                           ld.hierarchy_level, ld.is_omnibus_affected,
+                           ld.sector, ld.jurisdiction"""
+
+    STATUS_BOOST = """
                                * CASE WHEN ld.status='berlaku' THEN 1.2
-                                      WHEN ld.status='diubah'  THEN 1.1 ELSE 0.9 END AS rank
+                                      WHEN ld.status='diubah'  THEN 1.1 ELSE 0.9 END AS rank"""
+
+    if embedding:
+        try:
+            vec_str = str(embedding)
+            pool = MAX_SEARCH_POOL
+            if conversation_id:
+                cur.execute(SELECT_FIELDS + """,
+                           (1 - (dc.embedding <=> %s::vector))""" + STATUS_BOOST + """
                     FROM document_chunks dc JOIN legal_documents ld ON dc.document_id = ld.id
                     WHERE dc.embedding IS NOT NULL
                       AND (ld.scope='admin' OR (ld.scope='user' AND ld.conversation_id=%s))
                     ORDER BY dc.embedding <=> %s::vector LIMIT %s
-                """, (vec_str, conversation_id, vec_str, limit))
+                """, (vec_str, conversation_id, vec_str, pool))
             else:
-                cur.execute("""
-                    SELECT dc.content, dc.chunk_index,
-                           COALESCE(dc.pasal_ref,'') AS pasal_ref,
-                           COALESCE(dc.section_header,'') AS section_header,
-                           dc.page_number,
-                           ld.title AS doc_title, ld.filename, ld.scope,
-                           ld.nomor_tahun, ld.status AS doc_status, ld.doc_type,
-                           (1 - (dc.embedding <=> %s::vector))
-                               * CASE WHEN ld.status='berlaku' THEN 1.2
-                                      WHEN ld.status='diubah'  THEN 1.1 ELSE 0.9 END AS rank
+                cur.execute(SELECT_FIELDS + """,
+                           (1 - (dc.embedding <=> %s::vector))""" + STATUS_BOOST + """
                     FROM document_chunks dc JOIN legal_documents ld ON dc.document_id = ld.id
                     WHERE dc.embedding IS NOT NULL AND ld.scope='admin'
                     ORDER BY dc.embedding <=> %s::vector LIMIT %s
-                """, (vec_str, vec_str, limit))
-            results = cur.fetchall()
-            if results:
+                """, (vec_str, vec_str, pool))
+
+            rows = cur.fetchall()
+            if rows:
                 cur.close(); conn.close()
-                return [r for r in results if r['scope']=='admin'], [r for r in results if r['scope']=='user']
+                admin = _group_by_document(
+                    [r for r in rows if r['scope']=='admin'],
+                    max_docs=MAX_SEARCH_DOCS, max_chunks_per_doc=limit
+                )
+                user = _group_by_document(
+                    [r for r in rows if r['scope']=='user'],
+                    max_docs=MAX_SEARCH_DOCS, max_chunks_per_doc=limit
+                )
+                return admin, user
         except Exception:
             pass
-    # Keyword fallback
+
+    # ── Keyword fallback ──────────────────────────────────────────────────────
     search_terms = [t for t in re.sub(r'[^\w\s]', ' ', query).split() if len(t) > 1]
     if not search_terms:
         cur.close(); conn.close()
         return [], []
-    if conversation_id:
-        cur.execute("""
-            SELECT dc.content, dc.chunk_index,
-                   COALESCE(dc.pasal_ref,'') AS pasal_ref,
-                   COALESCE(dc.section_header,'') AS section_header,
-                   dc.page_number,
-                   ld.title AS doc_title, ld.filename, ld.scope,
-                   ld.nomor_tahun, ld.status AS doc_status, ld.doc_type,
-                   ts_rank_cd(dc.tsv, plainto_tsquery('simple',%s))
+
+    STATUS_BOOST_KW = """
                        * CASE WHEN ld.status='berlaku' THEN 1.5
-                              WHEN ld.status='diubah'  THEN 1.2 ELSE 0.8 END AS rank
+                              WHEN ld.status='diubah'  THEN 1.2 ELSE 0.8 END AS rank"""
+
+    if conversation_id:
+        cur.execute(SELECT_FIELDS + """,
+                   ts_rank_cd(dc.tsv, plainto_tsquery('simple',%s))""" + STATUS_BOOST_KW + """
             FROM document_chunks dc JOIN legal_documents ld ON dc.document_id = ld.id
             WHERE dc.tsv @@ plainto_tsquery('simple',%s)
               AND (ld.scope='admin' OR (ld.scope='user' AND ld.conversation_id=%s))
             ORDER BY rank DESC LIMIT %s
-        """, (query, query, conversation_id, limit))
+        """, (query, query, conversation_id, MAX_SEARCH_POOL))
     else:
-        cur.execute("""
-            SELECT dc.content, dc.chunk_index,
-                   COALESCE(dc.pasal_ref,'') AS pasal_ref,
-                   COALESCE(dc.section_header,'') AS section_header,
-                   dc.page_number,
-                   ld.title AS doc_title, ld.filename, ld.scope,
-                   ld.nomor_tahun, ld.status AS doc_status, ld.doc_type,
-                   ts_rank_cd(dc.tsv, plainto_tsquery('simple',%s))
-                       * CASE WHEN ld.status='berlaku' THEN 1.5
-                              WHEN ld.status='diubah'  THEN 1.2 ELSE 0.8 END AS rank
+        cur.execute(SELECT_FIELDS + """,
+                   ts_rank_cd(dc.tsv, plainto_tsquery('simple',%s))""" + STATUS_BOOST_KW + """
             FROM document_chunks dc JOIN legal_documents ld ON dc.document_id = ld.id
             WHERE dc.tsv @@ plainto_tsquery('simple',%s) AND ld.scope='admin'
             ORDER BY rank DESC LIMIT %s
-        """, (query, query, limit))
-    results = cur.fetchall()
+        """, (query, query, MAX_SEARCH_POOL))
+
+    rows = cur.fetchall()
     cur.close(); conn.close()
-    return [r for r in results if r['scope']=='admin'], [r for r in results if r['scope']=='user']
+    admin = _group_by_document(
+        [r for r in rows if r['scope']=='admin'],
+        max_docs=MAX_SEARCH_DOCS, max_chunks_per_doc=limit
+    )
+    user = _group_by_document(
+        [r for r in rows if r['scope']=='user'],
+        max_docs=MAX_SEARCH_DOCS, max_chunks_per_doc=limit
+    )
+    return admin, user
 
 
 def build_rag_context(query, conversation_id=None):
@@ -759,7 +958,7 @@ def build_rag_context(query, conversation_id=None):
     if admin_results:
         context_parts.append("--- LEGAL KNOWLEDGE BASE ---")
         for i, r in enumerate(admin_results, 1):
-            sanitized      = r['content'].replace("[DOCUMENT REFERENCE DATA", "").replace("[END DOCUMENT REFERENCE DATA]", "")
+            sanitized      = r['content'][:800].replace("[DOCUMENT REFERENCE DATA", "").replace("[END DOCUMENT REFERENCE DATA]", "")  # 800 char cap
             pasal_ref      = r.get('pasal_ref', '')
             section_header = r.get('section_header', '')
             header = "Source " + str(i) + " — " + r['doc_title']
@@ -768,14 +967,28 @@ def build_rag_context(query, conversation_id=None):
             if section_header:        header += " [" + section_header + "]"
             status_label = {'berlaku':'Active','diubah':'Amended','dicabut':'Revoked'}.get(r.get('doc_status',''), r.get('doc_status',''))
             if status_label:          header += " [" + status_label + "]"
+            # Hierarchy signal — lets AI apply Lex Superior mechanically
+            hlevel = r.get('hierarchy_level')
+            if hlevel is not None:    header += " [Level " + str(hlevel) + "]"
+            jurisdiction = r.get('jurisdiction', 'National')
+            if jurisdiction and jurisdiction != 'National':
+                                      header += " [" + jurisdiction + "]"
+            if r.get('is_omnibus_affected'): header += " [Omnibus Affected]"
+            if r.get('sector'):       header += " {" + r['sector'] + "}"
+            rank_score = r.get('rank', 0)
+            if rank_score:            header += " (relevance: " + f"{rank_score:.2f}" + ")"
             context_parts += [header + ":", sanitized, ""]
             sources.append({"title": r['doc_title'], "nomor_tahun": r.get('nomor_tahun',''),
                             "status": r.get('doc_status',''), "pasal_ref": pasal_ref,
-                            "section_header": section_header})
+                            "section_header": section_header,
+                            "hierarchy_level": hlevel, "jurisdiction": jurisdiction,
+                            "is_omnibus_affected": r.get('is_omnibus_affected', False),
+                            "sector": r.get('sector', ''),
+                            "rank": round(rank_score, 3) if rank_score else 0})
     if user_results:
         context_parts.append("--- USER-UPLOADED DOCUMENTS ---")
         for i, r in enumerate(user_results, 1):
-            sanitized = r['content'].replace("[DOCUMENT REFERENCE DATA", "").replace("[END DOCUMENT REFERENCE DATA]", "")
+            sanitized = r['content'][:800].replace("[DOCUMENT REFERENCE DATA", "").replace("[END DOCUMENT REFERENCE DATA]", "")  # 800 char cap
             pasal_ref = r.get('pasal_ref', '')
             header = "User Document " + str(i) + " — " + r['doc_title']
             if pasal_ref: header += " | " + pasal_ref
@@ -979,7 +1192,7 @@ def send_message(conv_id):
     if rag_context:
         prompt_parts.append(rag_context)
         prompt_parts.append("I have reviewed the relevant legal document excerpts and will use them as primary reference sources.")
-    for m in history:
+    for m in history[-6:]:  # last 6 messages — caps token cost as conversations grow
         if m["role"] == "user":
             prompt_parts.append(f"User: {m['content']}")
         elif m["role"] == "assistant":
