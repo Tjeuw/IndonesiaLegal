@@ -671,10 +671,14 @@ body.dark .source-chip-status.revoked { background: #450a0a; color: #fca5a5; }
   background: rgba(0,0,0,0.4);
   z-index: 99;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.25s;
 }
 
-.sidebar-overlay.visible { opacity: 1; }
+.sidebar-overlay.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
 
 /* ─── Admin styles ─── */
 .admin-login-page {
@@ -1004,18 +1008,7 @@ body.dark .admin-doc-delete:hover { background: #3f1515; color: #f87171; }
 }
 
 /* ─── Responsive ─── */
-@media (max-width: 768px) {
-  .sidebar {
-    position: fixed;
-    top: 0; left: 0; bottom: 0;
-    transform: translateX(-100%);
-    box-shadow: var(--shadow-md);
-  }
-  .sidebar.open { transform: translateX(0); }
-  .sidebar-overlay { display: block; }
-  .sidebar-toggle { display: flex; }
-  .admin-form-grid { grid-template-columns: 1fr; }
-}
+/* Mobile responsive styles at end of file */
 
 /* ─── Demo Controls ─── */
 .demo-controls-grid {
@@ -1247,4 +1240,96 @@ body.dark .message-counter.critical { color: #f87171; border-color: #991b1b; bac
 .chunk-browser-more {
   padding: 7px 14px; font-size: 12px; color: var(--text2);
   background: var(--surface2); border-top: 1px solid var(--border); text-align: center;
+}
+
+/* =====================================================
+   MOBILE RESPONSIVE
+   ===================================================== */
+
+@media (max-width: 768px) {
+
+  html, body { height: 100%; overflow: hidden; }
+
+  .app {
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  /* Sidebar: slide-in drawer */
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    z-index: 200;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: var(--shadow-md);
+    width: min(280px, 85vw);
+  }
+  .sidebar.open { transform: translateX(0); }
+
+  /* Overlay: display block but pointer-events none until visible */
+  .sidebar-overlay { display: block; }
+  .sidebar-toggle { display: flex; }
+
+  .main {
+    width: 100%;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .topbar { padding: 0 12px; flex-shrink: 0; }
+  .topbar-title { font-size: 13px; }
+
+  .messages-container {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  .welcome-screen {
+    padding: 32px 16px 24px;
+    min-height: unset;
+    align-items: flex-start;
+  }
+  .welcome-inner { max-width: 100%; }
+  .welcome-icon { font-size: 32px; margin-bottom: 10px; }
+  .welcome-title { font-size: 22px; }
+  .welcome-subtitle { font-size: 14px; margin-bottom: 20px; }
+
+  .chips { gap: 6px; }
+  .chip {
+    font-size: 12px;
+    padding: 8px 14px;
+    white-space: normal;
+    text-align: left;
+  }
+
+  .messages { padding: 16px 0 8px; width: 100%; }
+  .message-row { padding: 6px 12px; }
+  .message-bubble { max-width: 88%; font-size: 14px; line-height: 1.6; }
+
+  .input-area {
+    padding: 8px 12px;
+    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+    flex-shrink: 0;
+  }
+
+  .input-form { max-width: 100%; margin: 0; padding: 5px 6px; }
+
+  /* 16px prevents iOS auto-zoom on input focus */
+  .message-input { font-size: 16px; max-height: 120px; }
+
+  .attach-btn, .send-btn { width: 36px; height: 36px; flex-shrink: 0; }
+  .input-disclaimer { font-size: 10px; margin-top: 6px; max-width: 100%; }
+  .admin-form-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 380px) {
+  .welcome-title { font-size: 19px; }
+  .chip { font-size: 11px; padding: 7px 12px; }
+  .message-bubble { max-width: 94%; font-size: 13px; }
+  .sidebar { width: 90vw; }
 }
